@@ -1,8 +1,7 @@
 """Deterministic evaluation runner for the Multi-Agent Trip Planner.
 
-This evaluator intentionally avoids LLM-as-a-Judge. It measures properties that can be
-checked repeatedly and explained in an interview: structured output completeness,
-retrieval-agent success, fallback/retry behavior, itinerary constraints and latency.
+Measures structured output, retrieval success, retry/fallback behavior, deterministic
+constraint validation, automatic repair outcomes and latency without LLM-as-a-Judge.
 
 Run from backend/:
     python -m evals.run_eval
@@ -24,6 +23,7 @@ from typing import Any, Dict, Iterable, List
 
 from app.agents.trip_planner_agent import get_trip_planner_agent
 from app.models.schemas import TripPlan, TripRequest
+from app.services.constraint_service import merge_constraints_from_text
 from app.services.orchestration_service import execute_trip_plan
 
 
@@ -60,7 +60,7 @@ def build_request(case: Dict[str, Any]) -> TripRequest:
     travel_days = int(case["travel_days"])
     end = start + timedelta(days=travel_days - 1)
 
-    return TripRequest(
+    request = TripRequest(
         city=case["city"],
         start_date=start.isoformat(),
         end_date=end.isoformat(),
@@ -69,7 +69,9 @@ def build_request(case: Dict[str, Any]) -> TripRequest:
         accommodation=case["accommodation"],
         preferences=case.get("preferences", []),
         free_text_input=case.get("free_text_input", ""),
+        constraints=case.get("constraints", {}),
     )
+    return merge_constraints_from_text(request)
 
 
 def _all_coordinates_valid(plan: TripPlan) -> bool:
@@ -85,23 +87,14 @@ def _all_coordinates_valid(plan: TripPlan) -> bool:
 
 def _all_days_have_meals(plan: TripPlan) -> bool:
     required = {"breakfast", "lunch", "dinner"}
-    for day in plan.days:
-        meal_types = {meal.type for meal in day.meals}
-        if not required.issubset(meal_types):
-            return False
-    return True
+    return all(required.issubset({meal.type for meal in day.meals}) for day in plan.days)
 
 
 def _budget_consistent(plan: TripPlan) -> bool:
     if plan.budget is None:
         return False
     budget = plan.budget
-    components = (
-        budget.total_attractions
-        + budget.total_hotels
-        + budget.total_meals
-        + budget.total_transportation
-    )
+    components = budget.total_attractions + budget.total_hotels + budget.total_meals + budget.total_transportation
     return budget.total == components and min(
         budget.total_attractions,
         budget.total_hotels,
@@ -109,6 +102,14 @@ def _budget_consistent(plan: TripPlan) -> bool:
         budget.total_transportation,
         budget.total,
     ) >= 0
+
+
+def _final_validation_event(trace: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+    for agent_name in ("Post-Repair Validator", "Trip Validator"):
+        events = [item for item in trace if item.get("agent") == agent_name]
+        if events:
+            return events[-1]
+    return None
 
 
 def evaluate_case(
@@ -120,18 +121,22 @@ def evaluate_case(
     planner_event = next((item for item in trace if item.get("agent") == "Planner Agent"), None)
     retrieval_events = [item for item in trace if item.get("agent") in RETRIEVAL_AGENTS]
     orchestrator_event = next((item for item in trace if item.get("agent") == "Orchestrator"), None)
+    validation_event = _final_validation_event(trace)
+    repair_event = next((item for item in trace if item.get("agent") == "Repair Agent"), None)
 
     expected_min_attractions = int(case.get("expected_min_attractions", 1))
     require_budget = bool(case.get("require_budget", False))
     require_weather = bool(case.get("require_weather", False))
+    validation_passed = bool(
+        validation_event
+        and validation_event.get("validation_report", {}).get("passed") is True
+    )
 
     checks = {
         "city_matches_request": plan.city == request.city,
         "day_count_matches_request": len(plan.days) == request.travel_days,
         "day_indexes_are_sequential": [day.day_index for day in plan.days] == list(range(request.travel_days)),
-        "minimum_attractions_per_day": all(
-            len(day.attractions) >= expected_min_attractions for day in plan.days
-        ),
+        "minimum_attractions_per_day": all(len(day.attractions) >= expected_min_attractions for day in plan.days),
         "breakfast_lunch_dinner_present": _all_days_have_meals(plan),
         "coordinates_are_valid": _all_coordinates_valid(plan),
         "weather_coverage": (not require_weather) or len(plan.weather_info) >= request.travel_days,
@@ -139,8 +144,8 @@ def evaluate_case(
         "budget_is_consistent": (not require_budget) or _budget_consistent(plan),
         "all_retrieval_agents_succeeded": len(retrieval_events) == 3
         and all(item.get("status") == "success" for item in retrieval_events),
-        "planner_structured_output_succeeded": planner_event is not None
-        and planner_event.get("status") == "success",
+        "planner_structured_output_succeeded": planner_event is not None and planner_event.get("status") == "success",
+        "deterministic_validation_passed": validation_passed,
         "no_fallback_used": planner_event is not None and planner_event.get("status") != "fallback",
     }
 
@@ -156,11 +161,13 @@ def evaluate_case(
         "checks": checks,
         "failed_checks": failed_checks,
         "fallback_used": planner_event is not None and planner_event.get("status") == "fallback",
+        "validation_passed": validation_passed,
+        "repair_triggered": repair_event is not None,
+        "repair_succeeded": repair_event is not None and repair_event.get("status") == "success",
         "retrieval_successes": sum(item.get("status") == "success" for item in retrieval_events),
         "retrieval_steps": len(retrieval_events),
         "retried_steps": sum(
-            1
-            for item in trace
+            1 for item in trace
             if item.get("agent") != "Orchestrator" and int(item.get("attempts", 1) or 1) > 1
         ),
         "latency_ms": float(orchestrator_event.get("duration_ms", 0)) if orchestrator_event else 0.0,
@@ -178,6 +185,9 @@ def aggregate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     total_cases = len(results)
     passed_cases = sum(result["passed"] for result in results)
     fallback_cases = sum(result["fallback_used"] for result in results)
+    validation_passes = sum(result["validation_passed"] for result in results)
+    repair_cases = sum(result["repair_triggered"] for result in results)
+    repair_successes = sum(result["repair_succeeded"] for result in results)
     latencies = [result["latency_ms"] for result in results]
 
     retrieval_steps = sum(result["retrieval_steps"] for result in results)
@@ -189,10 +199,7 @@ def aggregate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     retried_steps = sum(result["retried_steps"] for result in results)
 
     planner_successes = sum(
-        any(
-            event.get("agent") == "Planner Agent" and event.get("status") == "success"
-            for event in result["trace"]
-        )
+        any(event.get("agent") == "Planner Agent" and event.get("status") == "success" for event in result["trace"])
         for result in results
     )
 
@@ -211,11 +218,12 @@ def aggregate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "total_cases": total_cases,
         "passed_cases": passed_cases,
         "case_pass_rate": _percentage(passed_cases, total_cases),
-        "average_check_score": round(
-            sum(result["check_score"] for result in results) / total_cases, 4
-        ) if total_cases else 0.0,
+        "average_check_score": round(sum(result["check_score"] for result in results) / total_cases, 4) if total_cases else 0.0,
         "structured_output_success_rate": _percentage(planner_successes, total_cases),
         "retrieval_agent_success_rate": _percentage(retrieval_successes, retrieval_steps),
+        "validation_pass_rate": _percentage(validation_passes, total_cases),
+        "repair_trigger_rate": _percentage(repair_cases, total_cases),
+        "repair_success_rate": _percentage(repair_successes, repair_cases),
         "fallback_rate": _percentage(fallback_cases, total_cases),
         "agent_step_retry_rate": _percentage(retried_steps, total_agent_steps),
         "average_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
@@ -231,6 +239,9 @@ def print_summary(metrics: Dict[str, Any], results: List[Dict[str, Any]]) -> Non
     print(f"Average check score:         {metrics['average_check_score']:.2%}")
     print(f"Structured output success:   {metrics['structured_output_success_rate']:.2%}")
     print(f"Retrieval agent success:     {metrics['retrieval_agent_success_rate']:.2%}")
+    print(f"Validation pass rate:        {metrics['validation_pass_rate']:.2%}")
+    print(f"Repair trigger rate:         {metrics['repair_trigger_rate']:.2%}")
+    print(f"Repair success rate:         {metrics['repair_success_rate']:.2%}")
     print(f"Fallback rate:               {metrics['fallback_rate']:.2%}")
     print(f"Agent step retry rate:       {metrics['agent_step_retry_rate']:.2%}")
     print(f"Average latency:             {metrics['average_latency_ms']:.2f} ms")
@@ -242,7 +253,7 @@ def print_summary(metrics: Dict[str, Any], results: List[Dict[str, Any]]) -> Non
         failures = ", ".join(result["failed_checks"]) or "-"
         print(
             f"  [{status}] {result['id']}: score={result['check_score']:.2%}, "
-            f"latency={result['latency_ms']:.0f}ms, failed={failures}"
+            f"latency={result['latency_ms']:.0f}ms, repair={result['repair_triggered']}, failed={failures}"
         )
 
 
@@ -296,7 +307,7 @@ def main() -> int:
 
     metrics = aggregate_results(results)
     report = {
-        "evaluation": "multi-agent-trip-planner-deterministic-v1",
+        "evaluation": "multi-agent-trip-planner-deterministic-v2",
         "metrics": metrics,
         "results": results,
     }
