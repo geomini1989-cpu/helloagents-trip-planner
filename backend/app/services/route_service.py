@@ -35,17 +35,25 @@ def _number(value: Any) -> Optional[float]:
 def _parse_json_candidates(raw: str) -> list[Any]:
     candidates: list[Any] = []
     text = raw.strip()
-    try:
-        candidates.append(json.loads(text))
-    except Exception:
-        pass
 
-    # MCP 文本里常会包一层说明或 markdown；优先解析完整 JSON，下面仅作为兼容 fallback。
-    for match in re.finditer(r"\{.*?\}", text, re.DOTALL):
+    def _try_parse(candidate: str) -> None:
         try:
-            candidates.append(json.loads(match.group()))
+            candidates.append(json.loads(candidate))
         except Exception:
-            continue
+            return
+
+    _try_parse(text)
+
+    # 支持 ```json ... ``` / ``` ... ```。
+    for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.IGNORECASE | re.DOTALL):
+        _try_parse(match.group(1).strip())
+
+    # MCP 有时会返回“说明文字 + JSON”。取第一个 { 到最后一个 } 能保留嵌套对象。
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        _try_parse(text[first_brace:last_brace + 1])
+
     return candidates
 
 
