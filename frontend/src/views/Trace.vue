@@ -4,7 +4,7 @@
       <div>
         <div class="eyebrow">AGENT OBSERVABILITY</div>
         <h1>Agent Execution Trace</h1>
-        <p>查看检索、规划、约束校验、自动修正、重试与耗时。</p>
+        <p>查看检索、规划、GIS 路线优化、约束校验、自动修正、锁定保护、重试与耗时。</p>
       </div>
       <a-space>
         <a-button @click="loadTrace" :loading="loading">刷新</a-button>
@@ -35,8 +35,8 @@
           <div class="metric-value">{{ totalDuration }} ms</div>
         </a-card>
         <a-card :bordered="false">
-          <div class="metric-label">Retried Steps</div>
-          <div class="metric-value">{{ retriedCount }}</div>
+          <div class="metric-label">GIS Saved</div>
+          <div class="metric-value">{{ gisSavedMinutes }} min</div>
         </a-card>
         <a-card :bordered="false">
           <div class="metric-label">Problem Events</div>
@@ -50,7 +50,16 @@
         show-icon
         class="degraded-alert"
         message="本次任务存在降级或未完全解决的约束冲突"
-        description="可能是 Agent / Tool 失败、Planner fallback，或自动修正后仍未通过 Validator。请查看下方 validation report。"
+        description="可能是 Agent / Tool / GIS 失败、Planner fallback，或自动修正后仍未通过 Validator。请查看下方执行明细。"
+      />
+
+      <a-alert
+        v-if="lockRestoreCount > 0"
+        type="warning"
+        show-icon
+        class="degraded-alert"
+        :message="`Lock Guard 已恢复 ${lockRestoreCount} 处被误改的锁定内容`"
+        description="Revision Agent 的候选修改触碰了用户锁定字段，后端已恢复原值；未锁定部分仍保留修改结果。"
       />
 
       <a-card class="pipeline-card" :bordered="false" title="任务编排链路">
@@ -93,11 +102,18 @@
             </div>
           </div>
 
-          <template v-for="item in validationFlowSteps" :key="item.id">
+          <template v-for="item in downstreamSteps" :key="item.id">
             <div class="flow-arrow">↓</div>
             <div
-              class="agent-node validation-node"
-              :class="[`status-${item.status}`, { 'repair-node': item.agent === 'Repair Agent' }]"
+              class="agent-node downstream-node"
+              :class="[
+                `status-${item.status}`,
+                {
+                  'repair-node': item.agent === 'Repair Agent',
+                  'gis-node': item.agent.includes('GIS'),
+                  'lock-node': item.agent === 'Revision Lock Guard'
+                }
+              ]"
             >
               <div class="node-top">
                 <strong>{{ item.agent }}</strong>
@@ -107,6 +123,12 @@
               <div class="node-meta">
                 <span v-if="item.validation_report">
                   Blocking issues: {{ item.validation_report.blocking_issue_count }}
+                </span>
+                <span v-if="item.route_optimization">
+                  Saved: {{ item.route_optimization.saved_minutes }} min · Reordered: {{ item.route_optimization.reordered_days }} day(s)
+                </span>
+                <span v-if="item.violations?.length">
+                  Restored: {{ item.violations.length }} locked field(s)
                 </span>
                 <span>{{ item.duration_ms }} ms</span>
               </div>
@@ -131,8 +153,34 @@
             <div v-if="item.error_category" class="error-category">Error · {{ item.error_category }}</div>
             <div v-if="item.error" class="timeline-error">{{ item.error }}</div>
 
+            <div v-if="item.route_optimization" class="gis-panel">
+              <div class="panel-title">GIS Route Optimization</div>
+              <div class="validation-meta">
+                <span>Reordered days: {{ item.route_optimization.reordered_days }}</span>
+                <span>Estimated saving: {{ item.route_optimization.saved_minutes }} min</span>
+                <span>
+                  Sources:
+                  {{ Object.entries(item.route_optimization.source_counts).map(([k, v]) => `${k}=${v}`).join(', ') || '-' }}
+                </span>
+              </div>
+              <div
+                v-for="day in item.route_optimization.days"
+                :key="`${item.id}-gis-${day.day_index}`"
+                class="gis-day"
+              >
+                <div class="gis-day-header">
+                  <strong>Day {{ day.day_index + 1 }}</strong>
+                  <span>{{ day.before_minutes }} → {{ day.after_minutes }} min</span>
+                </div>
+                <div class="route-order">
+                  <span>Before · {{ day.original_order.join(' → ') || '-' }}</span>
+                  <span>After · {{ day.optimized_order.join(' → ') || '-' }}</span>
+                </div>
+              </div>
+            </div>
+
             <div v-if="item.validation_report" class="validation-panel">
-              <div class="validation-title">
+              <div class="panel-title">
                 Validation · {{ item.validation_report.passed ? 'passed' : 'needs revision' }}
               </div>
               <div class="validation-meta">
@@ -150,6 +198,18 @@
               >
                 <strong>{{ issue.code }}</strong>
                 <span>{{ issue.message }}</span>
+              </div>
+            </div>
+
+            <div v-if="item.violations?.length" class="lock-panel">
+              <div class="panel-title">Revision Lock Guard · restored</div>
+              <div
+                v-for="(violation, index) in item.violations"
+                :key="`${item.id}-lock-${index}`"
+                class="lock-violation"
+              >
+                <strong>{{ violation.type }}</strong>
+                <span>{{ violation.message }}</span>
               </div>
             </div>
 
@@ -184,10 +244,20 @@ const loading = ref(false)
 const shortSessionId = computed(() => sessionId.value ? `${sessionId.value.slice(0, 8)}…${sessionId.value.slice(-4)}` : '-')
 const retrievalSteps = computed(() => trace.value.filter(item => ['Attraction Agent', 'Weather Agent', 'Hotel Agent'].includes(item.agent)))
 const plannerStep = computed(() => trace.value.find(item => item.agent === 'Planner Agent'))
-const validationFlowSteps = computed(() => trace.value.filter(item => ['Trip Validator', 'Repair Agent', 'Post-Repair Validator'].includes(item.agent)))
+const downstreamSteps = computed(() => trace.value.filter(item => [
+  'GIS Route Optimizer',
+  'Trip Validator',
+  'Repair Agent',
+  'Post-Repair GIS Optimizer',
+  'Post-Repair Validator',
+  'Revision Agent',
+  'Revision Lock Guard',
+].includes(item.agent)))
 const orchestratorStep = computed(() => trace.value.find(item => item.agent === 'Orchestrator'))
-const problemCount = computed(() => trace.value.filter(item => ['failed', 'fallback', 'needs_revision', 'degraded'].includes(item.status)).length)
+const problemCount = computed(() => trace.value.filter(item => ['failed', 'fallback', 'needs_revision', 'degraded', 'restored'].includes(item.status)).length)
 const retriedCount = computed(() => trace.value.filter(item => item.agent !== 'Orchestrator' && Number(item.attempts || 1) > 1).length)
+const gisSavedMinutes = computed(() => trace.value.reduce((sum, item) => sum + Number(item.route_optimization?.saved_minutes || 0), 0))
+const lockRestoreCount = computed(() => trace.value.reduce((sum, item) => sum + Number(item.violations?.length || 0), 0))
 const totalDuration = computed(() => {
   if (orchestratorStep.value) return orchestratorStep.value.duration_ms
   return Math.round(trace.value.reduce((sum, item) => sum + Number(item.duration_ms || 0), 0) * 100) / 100
@@ -196,13 +266,13 @@ const totalDuration = computed(() => {
 const statusColor = (status: string) => {
   if (status === 'success') return 'green'
   if (status === 'running') return 'blue'
-  if (['fallback', 'needs_revision', 'degraded'].includes(status)) return 'orange'
+  if (['fallback', 'needs_revision', 'degraded', 'restored'].includes(status)) return 'orange'
   return 'red'
 }
 
 const timelineColor = (status: string) => {
   if (status === 'success') return 'green'
-  if (['fallback', 'needs_revision', 'degraded'].includes(status)) return 'orange'
+  if (['fallback', 'needs_revision', 'degraded', 'restored'].includes(status)) return 'orange'
   if (status === 'failed') return 'red'
   return 'blue'
 }
@@ -317,7 +387,8 @@ onMounted(loadTrace)
 .status-failed { border-left: 4px solid #ef4444; }
 .status-fallback,
 .status-needs_revision,
-.status-degraded { border-left: 4px solid #f59e0b; }
+.status-degraded,
+.status-restored { border-left: 4px solid #f59e0b; }
 .status-running { border-left: 4px solid #3b82f6; }
 
 .node-top,
@@ -350,13 +421,15 @@ onMounted(loadTrace)
 }
 
 .planner-node,
-.validation-node {
-  width: min(620px, 100%);
+.downstream-node {
+  width: min(680px, 100%);
 }
 
 .planner-node { background: #eef2ff; }
-.validation-node { background: #f0fdf4; }
+.downstream-node { background: #f0fdf4; }
 .repair-node { background: #fff7ed; }
+.gis-node { background: #f0f9ff; }
+.lock-node { background: #fff7ed; }
 
 .timeline-title span {
   color: #94a3b8;
@@ -389,7 +462,9 @@ onMounted(loadTrace)
   color: #dc2626;
 }
 
-.validation-panel {
+.validation-panel,
+.gis-panel,
+.lock-panel {
   margin-top: 10px;
   padding: 12px;
   border-radius: 8px;
@@ -397,7 +472,10 @@ onMounted(loadTrace)
   border: 1px solid #e2e8f0;
 }
 
-.validation-title {
+.gis-panel { background: #f0f9ff; }
+.lock-panel { background: #fff7ed; }
+
+.panel-title {
   font-weight: 700;
   color: #334155;
 }
@@ -411,7 +489,8 @@ onMounted(loadTrace)
   font-size: 12px;
 }
 
-.validation-issue {
+.validation-issue,
+.lock-violation {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
   gap: 10px;
@@ -419,6 +498,11 @@ onMounted(loadTrace)
   padding: 8px 10px;
   border-radius: 6px;
   font-size: 12px;
+}
+
+.lock-violation {
+  background: #fffbeb;
+  color: #92400e;
 }
 
 .issue-error {
@@ -429,6 +513,29 @@ onMounted(loadTrace)
 .issue-warning {
   background: #fffbeb;
   color: #92400e;
+}
+
+.gis-day {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: #ffffff;
+  border: 1px solid #dbeafe;
+}
+
+.gis-day-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.route-order {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  color: #475569;
+  font-size: 12px;
 }
 
 .retry-panel {
@@ -484,7 +591,8 @@ onMounted(loadTrace)
   }
 
   .retry-row,
-  .validation-issue {
+  .validation-issue,
+  .lock-violation {
     grid-template-columns: 1fr;
   }
 }
