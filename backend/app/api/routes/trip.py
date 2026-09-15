@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from ...agents.trip_planner_agent import get_trip_planner_agent
 from ...models.schemas import TripRequest
+from ...services.constraint_service import merge_constraints_from_text
 from ...services.orchestration_service import execute_trip_plan
 from ...services.session_service import (
     create_session,
@@ -44,13 +45,14 @@ def _utc_now() -> str:
     "/plan",
     response_model=TripResponseWithSession,
     summary="生成旅行计划",
-    description="并行执行多个专业 Agent，生成结构化行程并持久化会话",
+    description="并行执行专业 Agent，并在确定性 Validator 检查后按需自动修正行程",
 )
 async def plan_trip(request: TripRequest):
-    """生成旅行计划，并返回可观察的 Agent 执行轨迹。"""
+    """生成旅行计划，并返回完整 Agent / Validator 执行轨迹。"""
     try:
+        effective_request = merge_constraints_from_text(request)
         planner = get_trip_planner_agent()
-        trip_plan, execution_trace = execute_trip_plan(planner, request)
+        trip_plan, execution_trace = execute_trip_plan(planner, effective_request)
 
         plan_dict = trip_plan.model_dump() if hasattr(trip_plan, "model_dump") else trip_plan.dict()
         session_id = create_session(plan_dict, execution_trace)
@@ -146,7 +148,7 @@ async def read_session(session_id: str):
 @router.get(
     "/trace/{session_id}",
     summary="读取 Agent Execution Trace",
-    description="仅返回该会话的 Agent 编排与执行轨迹，便于前端可视化和问题排查",
+    description="返回该会话的 Agent、Validator、Repair 执行轨迹",
 )
 async def read_execution_trace(session_id: str):
     trace = get_session_trace(session_id)
@@ -168,7 +170,7 @@ async def health_check():
             "status": "healthy",
             "service": "multi-agent-trip-planner",
             "persistence": "sqlite",
-            "orchestration": "parallel-fan-out-fan-in",
+            "orchestration": "fan-out-fan-in-validate-repair",
         }
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"服务不可用: {exc}") from exc
