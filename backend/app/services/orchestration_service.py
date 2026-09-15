@@ -1,11 +1,8 @@
-"""多智能体任务编排与执行追踪。
-
-Agent 负责完成单个专业任务；Orchestrator 负责并发调度、错误隔离、
-重试策略、耗时统计以及最终汇总。
-"""
+"""多智能体任务编排、执行追踪与验证修正闭环。"""
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,6 +12,7 @@ from typing import Any, Callable, Dict, List, Tuple
 from ..config import get_settings
 from ..models.schemas import TripPlan, TripRequest
 from .resilience_service import AgentExecutionError, AttemptError, run_with_retry
+from .validation_service import ValidationReport, validate_trip_plan
 
 
 TraceEvent = Dict[str, Any]
@@ -43,7 +41,6 @@ def _run_step(
     tool: str | None,
     runner: Callable[[], str],
 ) -> Tuple[str, TraceEvent]:
-    """运行一个检索 Agent，并转换为统一、可评估的 trace 事件。"""
     settings = get_settings()
     event: TraceEvent = {
         "id": str(uuid.uuid4()),
@@ -83,11 +80,30 @@ def _run_step(
         event["finished_at"] = _utc_now()
 
 
-def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, List[TraceEvent]]:
-    """并发执行检索型 Agent，fan-in 后交给 Planner Agent。
+def _validation_event(report: ValidationReport, *, agent_name: str, started_at: str, started: float) -> TraceEvent:
+    report_dict = report.to_dict()
+    status = "success" if report.passed else "needs_revision"
+    return {
+        "id": str(uuid.uuid4()),
+        "agent": agent_name,
+        "task": "校验预算、每日强度、重复景点与相邻景点交通耗时",
+        "tool": "amap_route + deterministic_rules",
+        "status": status,
+        "started_at": started_at,
+        "finished_at": _utc_now(),
+        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+        "attempts": 1,
+        "error": None,
+        "error_category": None,
+        "validation_report": report_dict,
+        "result_preview": json.dumps(report_dict, ensure_ascii=False)[:500],
+    }
 
-    每次调用先创建 request-scoped Agent，避免 SimpleAgent `_history`
-    在不同业务请求之间串扰。
+
+def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, List[TraceEvent]]:
+    """执行 fan-out/fan-in → Planner → Validator → optional Repair → Revalidate。
+
+    自动修正最多执行一次，避免 Agent 在“生成—检查—重写”之间无限循环。
     """
     settings = get_settings()
     trace: List[TraceEvent] = []
@@ -120,7 +136,6 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
     }
 
     results: Dict[str, str] = {}
-
     with ThreadPoolExecutor(max_workers=3, thread_name_prefix="trip-agent") as executor:
         future_to_key = {
             executor.submit(
@@ -132,7 +147,6 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
             ): key
             for key, job in jobs.items()
         }
-
         for future in as_completed(future_to_key):
             key = future_to_key[future]
             result, event = future.result()
@@ -145,7 +159,7 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
     planner_event: TraceEvent = {
         "id": str(uuid.uuid4()),
         "agent": "Planner Agent",
-        "task": "汇总多 Agent 结果并生成结构化行程",
+        "task": "汇总多 Agent 结果并生成满足硬约束的结构化行程",
         "tool": None,
         "status": "running",
         "started_at": _utc_now(),
@@ -156,7 +170,6 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
         "retry_errors": [],
     }
     planner_started = time.perf_counter()
-
     planner_query = planner._build_planner_query(
         request,
         results.get("attractions", ""),
@@ -165,9 +178,7 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
     )
 
     def _planner_once() -> tuple[str, TripPlan]:
-        # 每次重新生成都使用新的 Planner Agent，避免把上一次非法输出带入下一次尝试。
-        planner_agent = planner.create_planner_agent()
-        response = planner_agent.run(planner_query)
+        response = planner.create_planner_agent().run(planner_query)
         parsed = planner._parse_response(response, request=None)
         return response, parsed
 
@@ -194,25 +205,87 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
         planner_event["finished_at"] = _utc_now()
         trace.append(planner_event)
 
-    degraded = any(item["status"] in {"failed", "fallback"} for item in trace)
+    final_validation_passed = planner_event["status"] == "success"
+
+    if planner_event["status"] == "success":
+        validation_started_at = _utc_now()
+        validation_started = time.perf_counter()
+        report = validate_trip_plan(trip_plan, request, check_routes=True)
+        trace.append(_validation_event(
+            report,
+            agent_name="Trip Validator",
+            started_at=validation_started_at,
+            started=validation_started,
+        ))
+        final_validation_passed = report.passed
+
+        if report.blocking_issues:
+            repair_event: TraceEvent = {
+                "id": str(uuid.uuid4()),
+                "agent": "Repair Agent",
+                "task": "根据 Validator 问题做一次最小范围自动修正",
+                "tool": None,
+                "status": "running",
+                "started_at": _utc_now(),
+                "duration_ms": 0,
+                "attempts": 1,
+                "error": None,
+                "error_category": None,
+            }
+            repair_started = time.perf_counter()
+            try:
+                repaired = planner.repair_trip_plan(
+                    trip_plan,
+                    request,
+                    [issue.to_dict() for issue in report.blocking_issues],
+                )
+                trip_plan = repaired
+                repair_event["status"] = "success"
+                repair_event["result_preview"] = "已依据 Validator 报告完成一次最小修正"
+            except Exception as exc:
+                repair_event["status"] = "failed"
+                repair_event["error"] = str(exc)
+                repair_event["error_category"] = "repair_failed"
+            finally:
+                repair_event["duration_ms"] = round((time.perf_counter() - repair_started) * 1000, 2)
+                repair_event["finished_at"] = _utc_now()
+                trace.append(repair_event)
+
+            if repair_event["status"] == "success":
+                revalidate_started_at = _utc_now()
+                revalidate_started = time.perf_counter()
+                final_report = validate_trip_plan(trip_plan, request, check_routes=True)
+                trace.append(_validation_event(
+                    final_report,
+                    agent_name="Post-Repair Validator",
+                    started_at=revalidate_started_at,
+                    started=revalidate_started,
+                ))
+                final_validation_passed = final_report.passed
+            else:
+                final_validation_passed = False
+
+    degraded = (
+        any(item["status"] in {"failed", "fallback"} for item in trace)
+        or not final_validation_passed
+    )
     retried_steps = sum(1 for item in trace if int(item.get("attempts", 1) or 1) > 1)
 
-    trace.append(
-        {
-            "id": str(uuid.uuid4()),
-            "agent": "Orchestrator",
-            "task": "完成任务编排",
-            "tool": None,
-            "status": "success",
-            "started_at": trace[0]["started_at"] if trace else _utc_now(),
-            "finished_at": _utc_now(),
-            "duration_ms": round((time.perf_counter() - total_started) * 1000, 2),
-            "attempts": 1,
-            "error": None,
-            "error_category": None,
-            "degraded": degraded,
-            "retried_steps": retried_steps,
-        }
-    )
+    trace.append({
+        "id": str(uuid.uuid4()),
+        "agent": "Orchestrator",
+        "task": "完成检索、规划、校验与可选自动修正",
+        "tool": None,
+        "status": "degraded" if degraded else "success",
+        "started_at": trace[0]["started_at"] if trace else _utc_now(),
+        "finished_at": _utc_now(),
+        "duration_ms": round((time.perf_counter() - total_started) * 1000, 2),
+        "attempts": 1,
+        "error": None,
+        "error_category": None,
+        "degraded": degraded,
+        "validation_passed": final_validation_passed,
+        "retried_steps": retried_steps,
+    })
 
     return trip_plan, trace
