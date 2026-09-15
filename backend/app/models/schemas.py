@@ -2,48 +2,63 @@
 
 from typing import List, Optional, Union
 from pydantic import BaseModel, Field, field_validator
-from datetime import date
 
 
 # ============ 请求模型 ============
 
+class TripConstraints(BaseModel):
+    """可被 Planner 与 Validator 共同消费的硬约束。"""
+
+    max_budget: Optional[int] = Field(default=None, ge=0, description="总预算上限(元)")
+    max_daily_attractions: Optional[int] = Field(default=3, ge=1, le=8, description="每天最多景点数")
+    max_daily_visit_minutes: int = Field(default=480, ge=120, le=900, description="每天景点游览时长上限(分钟)")
+    max_route_minutes: int = Field(default=60, ge=10, le=240, description="相邻景点单段交通时间上限(分钟)")
+
+
 class TripRequest(BaseModel):
     """旅行规划请求"""
-    city: str = Field(..., description="目的地城市", example="北京")
-    start_date: str = Field(..., description="开始日期 YYYY-MM-DD", example="2025-06-01")
-    end_date: str = Field(..., description="结束日期 YYYY-MM-DD", example="2025-06-03")
-    travel_days: int = Field(..., description="旅行天数", ge=1, le=30, example=3)
-    transportation: str = Field(..., description="交通方式", example="公共交通")
-    accommodation: str = Field(..., description="住宿偏好", example="经济型酒店")
-    preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
-    free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
-    
+    city: str = Field(..., description="目的地城市", examples=["北京"])
+    start_date: str = Field(..., description="开始日期 YYYY-MM-DD", examples=["2026-10-01"])
+    end_date: str = Field(..., description="结束日期 YYYY-MM-DD", examples=["2026-10-03"])
+    travel_days: int = Field(..., description="旅行天数", ge=1, le=30, examples=[3])
+    transportation: str = Field(..., description="交通方式", examples=["公共交通"])
+    accommodation: str = Field(..., description="住宿偏好", examples=["经济型酒店"])
+    preferences: List[str] = Field(default_factory=list, description="旅行偏好标签", examples=[["历史文化", "美食"]])
+    free_text_input: Optional[str] = Field(default="", description="额外要求", examples=["希望多安排一些博物馆"])
+    constraints: TripConstraints = Field(default_factory=TripConstraints, description="结构化旅行约束")
+
     class Config:
         json_schema_extra = {
             "example": {
                 "city": "北京",
-                "start_date": "2025-06-01",
-                "end_date": "2025-06-03",
+                "start_date": "2026-10-01",
+                "end_date": "2026-10-03",
                 "travel_days": 3,
                 "transportation": "公共交通",
                 "accommodation": "经济型酒店",
                 "preferences": ["历史文化", "美食"],
-                "free_text_input": "希望多安排一些博物馆"
+                "free_text_input": "希望多安排一些博物馆",
+                "constraints": {
+                    "max_budget": 2500,
+                    "max_daily_attractions": 3,
+                    "max_daily_visit_minutes": 480,
+                    "max_route_minutes": 60
+                }
             }
         }
 
 
 class POISearchRequest(BaseModel):
     """POI搜索请求"""
-    keywords: str = Field(..., description="搜索关键词", example="故宫")
-    city: str = Field(..., description="城市", example="北京")
+    keywords: str = Field(..., description="搜索关键词", examples=["故宫"])
+    city: str = Field(..., description="城市", examples=["北京"])
     citylimit: bool = Field(default=True, description="是否限制在城市范围内")
 
 
 class RouteRequest(BaseModel):
     """路线规划请求"""
-    origin_address: str = Field(..., description="起点地址", example="北京市朝阳区阜通东大街6号")
-    destination_address: str = Field(..., description="终点地址", example="北京市海淀区上地十街10号")
+    origin_address: str = Field(..., description="起点地址")
+    destination_address: str = Field(..., description="终点地址")
     origin_city: Optional[str] = Field(default=None, description="起点城市")
     destination_city: Optional[str] = Field(default=None, description="终点城市")
     route_type: str = Field(default="walking", description="路线类型: walking/driving/transit")
@@ -102,8 +117,8 @@ class DayPlan(BaseModel):
     transportation: str = Field(..., description="交通方式")
     accommodation: str = Field(..., description="住宿")
     hotel: Optional[Hotel] = Field(default=None, description="推荐酒店")
-    attractions: List[Attraction] = Field(default=[], description="景点列表")
-    meals: List[Meal] = Field(default=[], description="餐饮列表")
+    attractions: List[Attraction] = Field(default_factory=list, description="景点列表")
+    meals: List[Meal] = Field(default_factory=list, description="餐饮列表")
 
 
 class WeatherInfo(BaseModel):
@@ -119,9 +134,7 @@ class WeatherInfo(BaseModel):
     @field_validator('day_temp', 'night_temp', mode='before')
     @classmethod
     def parse_temperature(cls, v):
-        """解析温度,移除°C等单位"""
         if isinstance(v, str):
-            # 移除°C, ℃等单位符号
             v = v.replace('°C', '').replace('℃', '').replace('°', '').strip()
             try:
                 return int(v)
@@ -145,7 +158,7 @@ class TripPlan(BaseModel):
     start_date: str = Field(..., description="开始日期")
     end_date: str = Field(..., description="结束日期")
     days: List[DayPlan] = Field(..., description="每日行程")
-    weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
+    weather_info: List[WeatherInfo] = Field(default_factory=list, description="天气信息")
     overall_suggestions: str = Field(..., description="总体建议")
     budget: Optional[Budget] = Field(default=None, description="预算信息")
 
@@ -171,7 +184,7 @@ class POISearchResponse(BaseModel):
     """POI搜索响应"""
     success: bool = Field(..., description="是否成功")
     message: str = Field(default="", description="消息")
-    data: List[POIInfo] = Field(default=[], description="POI列表")
+    data: List[POIInfo] = Field(default_factory=list, description="POI列表")
 
 
 class RouteInfo(BaseModel):
@@ -193,14 +206,11 @@ class WeatherResponse(BaseModel):
     """天气查询响应"""
     success: bool = Field(..., description="是否成功")
     message: str = Field(default="", description="消息")
-    data: List[WeatherInfo] = Field(default=[], description="天气信息")
+    data: List[WeatherInfo] = Field(default_factory=list, description="天气信息")
 
-
-# ============ 错误响应 ============
 
 class ErrorResponse(BaseModel):
     """错误响应"""
     success: bool = Field(default=False, description="是否成功")
     message: str = Field(..., description="错误消息")
     error_code: Optional[str] = Field(default=None, description="错误代码")
-
