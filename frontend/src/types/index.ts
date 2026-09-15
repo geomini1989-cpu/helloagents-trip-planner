@@ -76,6 +76,13 @@ export interface TripPlan {
   budget?: Budget
 }
 
+export interface TripConstraints {
+  max_budget?: number | null
+  max_daily_attractions?: number | null
+  max_daily_visit_minutes: number
+  max_route_minutes: number
+}
+
 export interface TripFormData {
   city: string
   start_date: string
@@ -85,6 +92,7 @@ export interface TripFormData {
   accommodation: string
   preferences: string[]
   free_text_input: string
+  constraints: TripConstraints
 }
 
 export interface RetryError {
@@ -94,12 +102,28 @@ export interface RetryError {
   retryable: boolean
 }
 
+export interface ValidationIssue {
+  code: string
+  severity: 'warning' | 'error' | string
+  message: string
+  day_index?: number | null
+  details?: Record<string, unknown>
+}
+
+export interface ValidationReport {
+  passed: boolean
+  blocking_issue_count: number
+  issues: ValidationIssue[]
+  checked_route_segments: number
+  route_source_counts: Record<string, number>
+}
+
 export interface ExecutionTraceEvent {
   id: string
   agent: string
   task: string
   tool?: string | null
-  status: 'running' | 'success' | 'failed' | 'fallback' | string
+  status: 'running' | 'success' | 'failed' | 'fallback' | 'needs_revision' | 'degraded' | string
   started_at: string
   finished_at?: string
   duration_ms: number
@@ -109,6 +133,8 @@ export interface ExecutionTraceEvent {
   retry_errors?: RetryError[]
   result_preview?: string
   degraded?: boolean
+  validation_passed?: boolean
+  validation_report?: ValidationReport
   retried_steps?: number
 }
 
