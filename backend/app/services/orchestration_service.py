@@ -77,7 +77,6 @@ def _run_step(
         event["error"] = str(exc)
         event["error_category"] = exc.category
         event["retry_errors"] = _errors_to_dict(exc.errors)
-        # 单个检索 Agent 失败时不让整个任务直接崩溃；Planner 会拿到明确的失败上下文。
         return f"{agent_name}执行失败（{exc.category}）：{exc}", event
     finally:
         event["duration_ms"] = round((time.perf_counter() - started) * 1000, 2)
@@ -87,12 +86,13 @@ def _run_step(
 def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, List[TraceEvent]]:
     """并发执行检索型 Agent，fan-in 后交给 Planner Agent。
 
-    Attraction / Weather / Hotel 三个任务没有数据依赖，因此并发执行；
-    Planner 等待三者结果后再生成最终结构化 TripPlan。
+    每次调用先创建 request-scoped Agent，避免 SimpleAgent `_history`
+    在不同业务请求之间串扰。
     """
     settings = get_settings()
     trace: List[TraceEvent] = []
     total_started = time.perf_counter()
+    agents = planner.create_request_agents()
 
     attraction_query = planner._build_attraction_query(request)
     weather_query = f"请查询{request.city}的天气信息"
@@ -103,19 +103,19 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
             "agent_name": "Attraction Agent",
             "task": "搜索符合偏好的景点",
             "tool": "amap_maps_text_search",
-            "runner": lambda: planner.attraction_agent.run(attraction_query),
+            "runner": lambda: agents["attraction"].run(attraction_query),
         },
         "weather": {
             "agent_name": "Weather Agent",
             "task": "查询目的地天气",
             "tool": "amap_maps_weather",
-            "runner": lambda: planner.weather_agent.run(weather_query),
+            "runner": lambda: agents["weather"].run(weather_query),
         },
         "hotels": {
             "agent_name": "Hotel Agent",
             "task": "搜索符合住宿偏好的酒店",
             "tool": "amap_maps_text_search",
-            "runner": lambda: planner.hotel_agent.run(hotel_query),
+            "runner": lambda: agents["hotel"].run(hotel_query),
         },
     }
 
@@ -139,7 +139,6 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
             results[key] = result
             trace.append(event)
 
-    # 保证 Trace 展示顺序稳定，不受线程完成先后影响。
     order = {"Attraction Agent": 0, "Weather Agent": 1, "Hotel Agent": 2}
     trace.sort(key=lambda item: order.get(item["agent"], 99))
 
@@ -166,9 +165,9 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
     )
 
     def _planner_once() -> tuple[str, TripPlan]:
-        # 使用 request=None 让结构化解析失败直接抛出，从而有机会重新生成；
-        # 所有重试耗尽后才进入最终 fallback。
-        response = planner.planner_agent.run(planner_query)
+        # 每次重新生成都使用新的 Planner Agent，避免把上一次非法输出带入下一次尝试。
+        planner_agent = planner.create_planner_agent()
+        response = planner_agent.run(planner_query)
         parsed = planner._parse_response(response, request=None)
         return response, parsed
 
