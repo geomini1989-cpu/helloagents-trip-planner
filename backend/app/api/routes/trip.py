@@ -5,10 +5,10 @@ from __future__ import annotations
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ...agents.trip_planner_agent import get_trip_planner_agent
 from ...models.schemas import TripRequest
@@ -33,7 +33,7 @@ class TripResponseWithSession(BaseModel):
     message: str
     session_id: str
     data: Any
-    execution_trace: List[Dict[str, Any]] = []
+    execution_trace: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 def _utc_now() -> str:
