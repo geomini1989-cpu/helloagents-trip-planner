@@ -2,6 +2,7 @@
 
 把高德 MCP 的路线工具结果收敛为稳定的 distance / duration 字段，供 Validator 使用。
 MCP 输出格式可能因版本而不同，因此解析器同时支持 JSON 与文本形式。
+纯解析逻辑不在模块导入时初始化 MCP，便于离线测试与复用。
 """
 
 from __future__ import annotations
@@ -9,8 +10,6 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Dict, Iterable, Optional
-
-from .amap_service import get_amap_mcp_tool
 
 
 def _iter_nodes(value: Any) -> Iterable[Any]:
@@ -41,6 +40,7 @@ def _parse_json_candidates(raw: str) -> list[Any]:
     except Exception:
         pass
 
+    # MCP 文本里常会包一层说明或 markdown；优先解析完整 JSON，下面仅作为兼容 fallback。
     for match in re.finditer(r"\{.*?\}", text, re.DOTALL):
         try:
             candidates.append(json.loads(match.group()))
@@ -70,49 +70,50 @@ def _extract_from_json(value: Any) -> Dict[str, Optional[float]]:
 
 
 def parse_route_metrics(raw: Any) -> Dict[str, Any]:
-    text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+    if isinstance(raw, str):
+        text = raw
+    else:
+        try:
+            text = json.dumps(raw, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = str(raw)
 
-    for candidate in ([raw] if not isinstance(raw, str) else []) + _parse_json_candidates(text):
+    direct_candidates = [raw] if not isinstance(raw, str) else []
+    for candidate in direct_candidates + _parse_json_candidates(text):
         parsed = _extract_from_json(candidate)
         if parsed["distance_meters"] is not None or parsed["duration_seconds"] is not None:
             return {**parsed, "raw": text}
 
     distance = None
     duration = None
+    distance_pattern = r"(?:distance|距离)\s*[:：=]?\s*(\d+(?:\.\d+)?)\s*(km|公里|m|米)?"
+    duration_pattern = r"(?:duration|耗时|时间)\s*[:：=]?\s*(\d+(?:\.\d+)?)\s*(小时|hour|hours|分钟|min|mins|秒|s)?"
 
-    distance_patterns = [
-        r"(?:distance|距离)\s*[:：=]?\s*(\d+(?:\.\d+)?)\s*(km|公里|m|米)?",
-    ]
-    duration_patterns = [
-        r"(?:duration|耗时|时间)\s*[:：=]?\s*(\d+(?:\.\d+)?)\s*(小时|hour|hours|分钟|min|mins|秒|s)?",
-    ]
+    match = re.search(distance_pattern, text, re.IGNORECASE)
+    if match:
+        value = float(match.group(1))
+        unit = (match.group(2) or "m").lower()
+        distance = value * 1000 if unit in {"km", "公里"} else value
 
-    for pattern in distance_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            value = float(match.group(1))
-            unit = (match.group(2) or "m").lower()
-            distance = value * 1000 if unit in {"km", "公里"} else value
-            break
-
-    for pattern in duration_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            value = float(match.group(1))
-            unit = (match.group(2) or "s").lower()
-            if unit in {"小时", "hour", "hours"}:
-                duration = value * 3600
-            elif unit in {"分钟", "min", "mins"}:
-                duration = value * 60
-            else:
-                duration = value
-            break
+    match = re.search(duration_pattern, text, re.IGNORECASE)
+    if match:
+        value = float(match.group(1))
+        unit = (match.group(2) or "s").lower()
+        if unit in {"小时", "hour", "hours"}:
+            duration = value * 3600
+        elif unit in {"分钟", "min", "mins"}:
+            duration = value * 60
+        else:
+            duration = value
 
     return {"distance_meters": distance, "duration_seconds": duration, "raw": text}
 
 
 class RouteService:
     def __init__(self):
+        # 延迟导入，避免只使用 route parser / Validator 规则时也强制初始化 MCP 依赖。
+        from .amap_service import get_amap_mcp_tool
+
         self.mcp_tool = get_amap_mcp_tool()
 
     def plan_route(
