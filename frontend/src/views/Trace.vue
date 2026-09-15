@@ -4,7 +4,7 @@
       <div>
         <div class="eyebrow">AGENT OBSERVABILITY</div>
         <h1>Agent Execution Trace</h1>
-        <p>查看一次旅行规划请求中各 Agent 的任务、工具调用、状态与耗时。</p>
+        <p>查看一次旅行规划请求中各 Agent 的任务、工具调用、状态、重试与耗时。</p>
       </div>
       <a-space>
         <a-button @click="loadTrace" :loading="loading">刷新</a-button>
@@ -27,7 +27,7 @@
           <div class="metric-value session-value">{{ shortSessionId }}</div>
         </a-card>
         <a-card :bordered="false">
-          <div class="metric-label">Agent Steps</div>
+          <div class="metric-label">Trace Events</div>
           <div class="metric-value">{{ trace.length }}</div>
         </a-card>
         <a-card :bordered="false">
@@ -35,10 +35,23 @@
           <div class="metric-value">{{ totalDuration }} ms</div>
         </a-card>
         <a-card :bordered="false">
-          <div class="metric-label">Failed Steps</div>
+          <div class="metric-label">Retried Steps</div>
+          <div class="metric-value">{{ retriedCount }}</div>
+        </a-card>
+        <a-card :bordered="false">
+          <div class="metric-label">Failed / Fallback</div>
           <div class="metric-value">{{ failedCount }}</div>
         </a-card>
       </div>
+
+      <a-alert
+        v-if="orchestratorStep?.degraded"
+        type="warning"
+        show-icon
+        class="degraded-alert"
+        message="本次任务已完成，但存在降级步骤"
+        description="至少一个 Agent 调用失败或 Planner 使用了 fallback。可在下方查看错误类别与重试记录。"
+      />
 
       <a-card class="pipeline-card" :bordered="false" title="任务编排链路">
         <div class="pipeline">
@@ -57,6 +70,7 @@
               <div class="node-meta">
                 <span v-if="item.tool">Tool: {{ item.tool }}</span>
                 <span>{{ item.duration_ms }} ms</span>
+                <span>Attempts: {{ item.attempts || 1 }}</span>
               </div>
             </div>
           </div>
@@ -73,7 +87,10 @@
               <a-tag :color="statusColor(plannerStep.status)">{{ plannerStep.status }}</a-tag>
             </div>
             <div class="node-task">{{ plannerStep.task }}</div>
-            <div class="node-meta"><span>{{ plannerStep.duration_ms }} ms</span></div>
+            <div class="node-meta">
+              <span>{{ plannerStep.duration_ms }} ms</span>
+              <span>Attempts: {{ plannerStep.attempts || 1 }}</span>
+            </div>
           </div>
         </div>
       </a-card>
@@ -87,11 +104,22 @@
           >
             <div class="timeline-title">
               <strong>{{ item.agent }}</strong>
-              <span>{{ item.duration_ms }} ms</span>
+              <span>{{ item.duration_ms }} ms · {{ item.attempts || 1 }} attempt(s)</span>
             </div>
             <div class="timeline-task">{{ item.task }}</div>
             <div v-if="item.tool" class="timeline-tool">Tool · {{ item.tool }}</div>
+            <div v-if="item.error_category" class="error-category">Error · {{ item.error_category }}</div>
             <div v-if="item.error" class="timeline-error">{{ item.error }}</div>
+
+            <div v-if="item.retry_errors?.length" class="retry-panel">
+              <div class="retry-title">Retry history</div>
+              <div v-for="retry in item.retry_errors" :key="`${item.id}-${retry.attempt}`" class="retry-row">
+                <span>#{{ retry.attempt }}</span>
+                <span>{{ retry.category }}</span>
+                <span>{{ retry.message }}</span>
+              </div>
+            </div>
+
             <div v-if="item.result_preview" class="preview">{{ item.result_preview }}</div>
           </a-timeline-item>
         </a-timeline>
@@ -114,10 +142,11 @@ const loading = ref(false)
 const shortSessionId = computed(() => sessionId.value ? `${sessionId.value.slice(0, 8)}…${sessionId.value.slice(-4)}` : '-')
 const retrievalSteps = computed(() => trace.value.filter(item => ['Attraction Agent', 'Weather Agent', 'Hotel Agent'].includes(item.agent)))
 const plannerStep = computed(() => trace.value.find(item => item.agent === 'Planner Agent'))
+const orchestratorStep = computed(() => trace.value.find(item => item.agent === 'Orchestrator'))
 const failedCount = computed(() => trace.value.filter(item => ['failed', 'fallback'].includes(item.status)).length)
+const retriedCount = computed(() => trace.value.filter(item => item.agent !== 'Orchestrator' && Number(item.attempts || 1) > 1).length)
 const totalDuration = computed(() => {
-  const orchestrator = trace.value.find(item => item.agent === 'Orchestrator')
-  if (orchestrator) return orchestrator.duration_ms
+  if (orchestratorStep.value) return orchestratorStep.value.duration_ms
   return Math.round(trace.value.reduce((sum, item) => sum + Number(item.duration_ms || 0), 0) * 100) / 100
 })
 
@@ -189,7 +218,7 @@ onMounted(loadTrace)
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 20px;
 }
@@ -209,6 +238,10 @@ onMounted(loadTrace)
 .session-value {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 18px;
+}
+
+.degraded-alert {
+  margin-bottom: 20px;
 }
 
 .pipeline-card,
@@ -261,6 +294,7 @@ onMounted(loadTrace)
   margin-top: 12px;
   color: #94a3b8;
   font-size: 12px;
+  flex-wrap: wrap;
 }
 
 .flow-arrow {
@@ -280,20 +314,54 @@ onMounted(loadTrace)
   font-size: 12px;
 }
 
-.timeline-tool {
+.timeline-tool,
+.error-category {
   display: inline-block;
   margin-top: 8px;
+  margin-right: 8px;
   padding: 3px 8px;
   border-radius: 6px;
-  background: #eef2ff;
-  color: #4f46e5;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
+}
+
+.timeline-tool {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+
+.error-category {
+  background: #fff7ed;
+  color: #c2410c;
 }
 
 .timeline-error {
   margin-top: 8px;
   color: #dc2626;
+}
+
+.retry-panel {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
+.retry-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #92400e;
+  margin-bottom: 6px;
+}
+
+.retry-row {
+  display: grid;
+  grid-template-columns: 36px 100px minmax(0, 1fr);
+  gap: 8px;
+  font-size: 12px;
+  color: #78350f;
+  margin-top: 4px;
 }
 
 .preview {
@@ -308,6 +376,12 @@ onMounted(loadTrace)
   overflow-wrap: anywhere;
 }
 
+@media (max-width: 1000px) {
+  .summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 900px) {
   .summary-grid,
   .parallel-group {
@@ -316,6 +390,10 @@ onMounted(loadTrace)
 
   .trace-header {
     flex-direction: column;
+  }
+
+  .retry-row {
+    grid-template-columns: 1fr;
   }
 }
 </style>
