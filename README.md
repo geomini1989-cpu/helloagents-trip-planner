@@ -1,105 +1,32 @@
 # Multi-Agent Trip Planner
 
-一个面向真实旅行规划场景的 **多智能体（Multi-Agent）旅行规划系统**。
+一个面向真实旅行规划场景的 **多智能体（Multi-Agent）AI 应用**。
 
-项目基于 HelloAgents 构建多个专职 Agent，通过 **MCP（Model Context Protocol）** 接入高德地图能力，并使用 FastAPI + Vue 3 完成从用户需求、Agent 工具调用、结构化行程生成，到自然语言二次修改与地图展示的完整闭环。
+项目使用 HelloAgents 构建多个专职 Agent，通过 **MCP（Model Context Protocol）** 接入高德地图能力，并以 FastAPI + Vue 3 完成任务编排、真实工具调用、结构化结果生成、会话持久化、自然语言修订和 Agent Execution Trace 展示。
 
-> 这个项目的重点不是“让大模型生成一段旅行文案”，而是探索如何把 **Agent 编排、外部工具调用、结构化输出、会话状态和前后端交互** 组合成一个可运行的 AI 应用。
+> 这个项目的重点不是“让大模型写一段旅行文案”，而是把 **Agent Orchestration、Tool Calling、Structured Output、State Persistence 与 Observability** 组合成一个可运行、可观察、可继续工程化的 Agent System。
 
-## 核心能力
+## Highlights
 
-### 1. 多 Agent 协作
+- **Multi-Agent Decomposition**：景点、天气、酒店、行程规划分别由专职 Agent 处理
+- **Parallel Orchestration**：三个检索型 Agent 采用 fan-out / fan-in 并行任务编排
+- **MCP Tool Calling**：通过高德地图 MCP 获取 POI、天气和路线等真实外部信息
+- **Structured Output**：Planner Agent 输出受 Pydantic 模型约束的 TripPlan
+- **Persistent Session**：使用 SQLite 保存当前行程、历史版本和执行轨迹
+- **Natural-language Revision**：用户可基于 session_id 继续用自然语言局部修改行程
+- **Agent Observability**：前端独立 Execution Trace 页面展示 Agent、Tool、Status、Latency 和错误信息
 
-系统将旅行规划拆分为多个职责明确的 Agent：
-
-- **Attraction Agent**：根据目的地和用户偏好搜索景点
-- **Weather Agent**：获取目的地天气信息
-- **Hotel Agent**：搜索并推荐住宿
-- **Planner Agent**：整合景点、天气、酒店等结果，生成完整行程
-
-各 Agent 共享同一套地图工具能力，由 `MultiAgentTripPlanner` 统一组织执行流程。
-
-### 2. MCP 工具调用
-
-通过 `MCPTool` 接入高德地图 MCP Server，让 Agent 可以调用真实外部能力，而不是仅依赖模型内部知识。
-
-当前包括：
-
-- POI / 景点搜索
-- 天气查询
-- 酒店搜索
-- 步行路线规划
-- 驾车路线规划
-- 公共交通路线规划
-
-在景点、天气和酒店 Agent 的 Prompt 中明确要求优先使用工具结果，降低模型直接编造实时信息的风险。
-
-### 3. 结构化行程生成
-
-Planner Agent 将多个 Agent 的结果整合为统一的结构化 Trip Plan，包括：
-
-- 每日行程
-- 景点与坐标
-- 酒店信息
-- 交通方式
-- 天气
-- 餐饮建议
-- 预算估算
-
-后端通过 Pydantic 数据模型约束 API 输入与输出，前端不需要解析不可控的自然语言文本即可渲染结果。
-
-### 4. 基于 Session 的自然语言修改
-
-首次生成行程后，后端会创建 `session_id` 并保存当前计划。
-
-用户可以继续输入自然语言，例如：
-
-```text
-把第二天的博物馆换成公园，其他行程保持不变。
-```
-
-系统会读取当前计划，由 Agent 对指定部分进行修改，再更新当前 Session 中保存的行程。
-
-这使应用从“一次性生成”扩展为可持续调整的 **Agent 会话式工作流**。
-
-### 5. 完整全栈应用
-
-前端使用 Vue 3 + TypeScript，实现旅行信息输入、行程展示和地图交互；后端使用 FastAPI 提供 Agent 调用和地图相关 API。
-
-项目覆盖：
-
-```text
-用户输入
-   ↓
-Vue 3 / TypeScript
-   ↓
-FastAPI
-   ↓
-MultiAgentTripPlanner
-   ├── Attraction Agent ─┐
-   ├── Weather Agent ────┼── MCP ── 高德地图服务
-   └── Hotel Agent ──────┘
-             ↓
-        Planner Agent
-             ↓
-      Structured TripPlan
-             ↓
-      Session / FastAPI
-             ↓
-       前端地图与行程展示
-```
-
-## 系统架构
+## Architecture
 
 ```mermaid
 flowchart TD
     U[User] --> FE[Vue 3 + TypeScript]
     FE --> API[FastAPI]
-    API --> ORCH[MultiAgentTripPlanner]
+    API --> O[Orchestration Service]
 
-    ORCH --> A[Attraction Agent]
-    ORCH --> W[Weather Agent]
-    ORCH --> H[Hotel Agent]
+    O -->|parallel| A[Attraction Agent]
+    O -->|parallel| W[Weather Agent]
+    O -->|parallel| H[Hotel Agent]
 
     A --> MCP[AMap MCP Server]
     W --> MCP
@@ -110,71 +37,140 @@ flowchart TD
     H --> P
 
     P --> TP[Structured TripPlan]
-    TP --> S[Session State]
-    S --> API
+    TP --> DB[(SQLite Session Store)]
+    O --> T[Execution Trace]
+    T --> DB
+
+    DB --> API
     API --> FE
 
     FE -->|Natural-language revision| API
-    API --> R[Revision Workflow]
-    R --> P
+    API --> R[Revision Agent]
+    R --> DB
 ```
 
-## 一次请求的执行流程
+## Agent Workflow
 
-1. 用户填写目的地、日期、住宿方式和旅行偏好。
-2. Attraction Agent 调用地图工具搜索符合偏好的真实 POI。
-3. Weather Agent 调用天气工具获取目的地天气信息。
-4. Hotel Agent 搜索住宿候选项。
-5. Planner Agent 将多个 Agent 返回的信息整合成结构化旅行计划。
-6. 后端将计划保存到 Session，并把 `session_id + TripPlan` 返回前端。
-7. 用户可以继续通过自然语言提出局部修改。
-8. Revision Workflow 根据当前计划和用户反馈生成新的 TripPlan。
+一次旅行规划请求会经历：
 
-## 技术栈
+```text
+User Request
+    ↓
+FastAPI
+    ↓
+Orchestrator
+    ├── Attraction Agent ── MCP / AMap ─┐
+    ├── Weather Agent ───── MCP / AMap ─┼── parallel
+    └── Hotel Agent ─────── MCP / AMap ─┘
+                    ↓ fan-in
+               Planner Agent
+                    ↓
+             Structured TripPlan
+                    ↓
+        SQLite Session + Execution Trace
+                    ↓
+            Vue Result / Trace UI
+```
+
+Attraction、Weather、Hotel 三个任务之间没有直接数据依赖，因此由 `ThreadPoolExecutor` 并发调度；Planner Agent 等待三类结果汇合后再生成最终结构化行程。
+
+## Agent Execution Trace
+
+每个步骤都会记录统一的执行事件：
+
+```json
+{
+  "agent": "Weather Agent",
+  "task": "查询目的地天气",
+  "tool": "amap_maps_weather",
+  "status": "success",
+  "duration_ms": 1264.42,
+  "error": null
+}
+```
+
+前端 `/trace` 页面会把一次会话中的执行过程展示为：
+
+- 三个并行检索 Agent
+- Planner 汇总节点
+- Agent 状态
+- MCP Tool 名称
+- 单步耗时
+- 总编排耗时
+- 失败 / fallback 信息
+- 简短结果预览
+
+这让项目不仅能够“运行 Agent”，也能够观察 Agent 为什么成功或失败。
+
+## Persistent Session & Revision
+
+首次生成计划后，后端会创建 `session_id`，并把以下数据持久化到 SQLite：
+
+```text
+session_id
+current_plan
+history
+execution_trace
+created_at
+updated_at
+```
+
+用户可以继续输入：
+
+```text
+把第二天上午的博物馆换成一个适合拍照的公园，其他安排不变。
+```
+
+Revision Agent 会基于当前 TripPlan 做局部调整；旧版本会进入 `history`，新的 Revision Trace 也会追加到当前 Session。
+
+因此服务重启后，会话不再因为 Python 进程内存清空而直接丢失。
+
+## Tech Stack
 
 ### Agent / Backend
 
 - Python
-- HelloAgents
-- SimpleAgent
+- HelloAgents / SimpleAgent
 - MCPTool / Model Context Protocol
 - AMap MCP Server
 - FastAPI
 - Pydantic
+- SQLite
+- `concurrent.futures.ThreadPoolExecutor`
 - 可配置 LLM Provider / Model
 
 ### Frontend
 
 - Vue 3
 - TypeScript
+- Vue Router
 - Vite
 - Ant Design Vue
 - Axios
-- 高德地图 JavaScript API
+- AMap JavaScript API
 - html2canvas / jsPDF
 
-## 项目结构
+## Project Structure
 
 ```text
 multi-agent-trip-planner/
 ├── backend/
 │   ├── app/
 │   │   ├── agents/
-│   │   │   └── trip_planner_agent.py   # 多 Agent 定义与编排
+│   │   │   └── trip_planner_agent.py
 │   │   ├── api/
-│   │   │   ├── main.py
 │   │   │   └── routes/
-│   │   │       ├── trip.py             # 行程生成 / 修改接口
+│   │   │       ├── trip.py
 │   │   │       ├── map.py
 │   │   │       └── poi.py
 │   │   ├── models/
-│   │   │   └── schemas.py              # 结构化数据模型
-│   │   ├── services/
-│   │   │   ├── amap_service.py
-│   │   │   ├── llm_service.py
-│   │   │   ├── session_service.py
-│   │   │   └── unsplash_service.py
-│   │   └── config.py
+│   │   │   └── schemas.py
+│   │   └── services/
+│   │       ├── orchestration_service.py  # 并行任务编排 + Trace
+│   │       ├── session_service.py        # SQLite 会话持久化
+│   │       ├── amap_service.py
+│   │       ├── llm_service.py
+│   │       └── unsplash_service.py
 │   ├── requirements.txt
 │   └── run.py
 ├── frontend/
@@ -183,21 +179,22 @@ multi-agent-trip-planner/
 │   │   ├── types/
 │   │   └── views/
 │   │       ├── Home.vue
-│   │       └── Result.vue
+│   │       ├── Result.vue
+│   │       └── Trace.vue               # Agent Execution Trace
 │   └── package.json
 └── README.md
 ```
 
-## 快速开始
+## Quick Start
 
-### 环境要求
+### Requirements
 
 - Python 3.10+
 - Node.js 16+
-- 高德地图 API Key
+- AMap API Key
 - 一个兼容 HelloAgents 的 LLM API 配置
 
-### 1. 启动后端
+### Backend
 
 ```bash
 cd backend
@@ -205,21 +202,16 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-```
-
-在 `.env` 中配置 LLM 和高德地图相关 Key，然后运行：
-
-```bash
 uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-FastAPI 文档：
+FastAPI Docs：
 
 ```text
 http://localhost:8000/docs
 ```
 
-### 2. 启动前端
+### Frontend
 
 ```bash
 cd frontend
@@ -234,23 +226,33 @@ npm run dev
 http://localhost:5173
 ```
 
-## 核心 API
+生成一次旅行计划后，可以从顶部导航进入：
 
-### 创建旅行计划
+```text
+http://localhost:5173/trace
+```
+
+查看当前 Session 的 Agent Execution Trace。
+
+## Core APIs
+
+### Generate Trip Plan
 
 ```http
 POST /api/trip/plan
 ```
 
-返回旅行计划和本次会话对应的 `session_id`。
+返回：
 
-### 修改已有旅行计划
+```text
+session_id + TripPlan + execution_trace
+```
+
+### Revise Trip Plan
 
 ```http
 POST /api/trip/revise
 ```
-
-示例请求：
 
 ```json
 {
@@ -259,40 +261,84 @@ POST /api/trip/revise
 }
 ```
 
-## 当前实现边界
+### Read Persistent Session
 
-这个版本以验证 Agent 工作流为主要目标，因此仍保留了一些明确的工程化改进空间：
+```http
+GET /api/trip/session/{session_id}
+```
 
-- 多个专业 Agent 当前由固定流程顺序调用，还没有动态任务路由或 DAG 调度
-- Session 当前保存在进程内存中，服务重启后不会持久化
-- Agent 调用过程缺少完整的 tracing / token / latency 可观测能力
-- 尚未建立系统化的 Agent Eval 与回归测试集
-- 工具调用异常、模型异常和超时策略仍可以进一步统一
+可读取当前计划、历史版本以及完整 Execution Trace。
 
-这些限制也是后续将 Demo 演进为更完整 Agent System 的重点。
+### Read Execution Trace
+
+```http
+GET /api/trip/trace/{session_id}
+```
+
+用于可观测性页面或调试工具直接消费。
+
+## Engineering Decisions
+
+### Why separate Orchestrator from Agent implementation?
+
+`trip_planner_agent.py` 关注单个 Agent 的能力与 Prompt；`orchestration_service.py` 负责：
+
+- 任务依赖关系
+- 并行调度
+- fan-out / fan-in
+- 错误隔离
+- latency 统计
+- execution trace
+
+这样后续增加 Coordinator、DAG 或异步任务队列时，不需要把调度逻辑继续堆进 Agent 类。
+
+### Why SQLite first?
+
+当前项目是单机作品集应用，SQLite 能以很低复杂度解决“进程重启后 Session 丢失”的核心问题，同时保持数据模型清晰。
+
+如果进一步部署为多实例服务，可以把 Session Store 替换为 PostgreSQL / Redis，而上层 API 和 Agent 工作流不需要大改。
+
+## Current Boundaries
+
+当前版本已经完成并行编排、持久化和基础 Trace，但仍有明确的工程化空间：
+
+- 当前 Agent 路由仍是固定任务图，还不是动态 Coordinator / Router
+- Execution Trace 记录 Agent / Tool / latency / error，但还没有 token usage 与 LLM span
+- MCP 工具层还需要进一步统一 timeout / retry / circuit breaker
+- Session Store 当前使用 SQLite，暂未面向多实例并发部署
+- 缺少系统化的 Agent Eval Dataset 和自动回归指标
+- 尚未加入 CI、容器化部署和生产级日志体系
 
 ## Roadmap
 
-- [ ] 将景点、天气、酒店查询改造成可并行执行的任务节点
-- [ ] 增加 Coordinator / Router，按任务动态选择 Agent 与工具
-- [ ] 使用 Redis / Database 持久化 Session 和执行记录
-- [ ] 增加 Agent Execution Trace，展示每一步模型与工具调用
-- [ ] 增加工具调用超时、重试、降级与统一错误模型
-- [ ] 建立旅行规划 Eval Dataset，评估工具正确率与结构化输出稳定性
-- [ ] 增加自动化测试和 CI
-- [ ] Docker 化前后端服务并补充部署方案
+- [x] Multi-Agent 任务拆分
+- [x] MCP Tool Calling
+- [x] Structured TripPlan
+- [x] 自然语言行程修订
+- [x] 并行 fan-out / fan-in Agent Orchestration
+- [x] SQLite Session Persistence
+- [x] Agent Execution Trace API
+- [x] Execution Trace 可视化页面
+- [ ] Coordinator / Router 动态任务选择
+- [ ] Tool timeout / retry / fallback policy
+- [ ] Agent Eval Dataset + regression metrics
+- [ ] token usage / model span tracing
+- [ ] automated tests + CI
+- [ ] Docker / deployment
 
-## 项目价值
+## Why This Project
 
-相比普通的 LLM Chat Demo，本项目更关注 Agent 应用工程中的几个核心问题：
+相比普通 LLM Chat Demo，本项目主要验证这些 Agent Engineering 问题：
 
-- 如何把复杂任务拆分给不同 Agent
-- 如何让 Agent 使用真实外部工具获取信息
-- 如何约束模型输出为前端可消费的数据结构
-- 如何维护多轮任务中的业务状态
-- 如何把 Agent 能力集成进一个真正可交互的全栈应用
+- 如何把复杂业务目标拆成多个 Agent 任务
+- 哪些任务可以并行，哪些任务存在数据依赖
+- 如何让 Agent 通过 MCP 使用真实外部工具
+- 如何把模型结果约束成前端可消费的结构化数据
+- 如何维护跨多轮交互的任务状态和历史版本
+- 如何让 Agent 执行过程可观察、可调试、可解释
+- 如何把上述能力整合进一个真正可运行的全栈产品
 
-因此，这个项目既可以作为旅行规划应用，也可以作为 **Multi-Agent + MCP + Full-stack AI Application** 的工程实践。
+因此它既是旅行规划应用，也是一个 **Multi-Agent + MCP + Orchestration + Observability + Full-stack AI Application** 的工程实践。
 
 ## License
 
