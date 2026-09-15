@@ -83,6 +83,12 @@ export interface TripConstraints {
   max_route_minutes: number
 }
 
+export interface RevisionLocks {
+  locked_day_indexes: number[]
+  lock_all_hotels: boolean
+  locked_attraction_names: string[]
+}
+
 export interface TripFormData {
   city: string
   start_date: string
@@ -118,12 +124,40 @@ export interface ValidationReport {
   route_source_counts: Record<string, number>
 }
 
+export interface DayRouteOptimization {
+  day_index: number
+  original_order: string[]
+  optimized_order: string[]
+  before_minutes: number
+  after_minutes: number
+  saved_minutes: number
+  reordered: boolean
+  route_type: string
+  source_counts: Record<string, number>
+  evaluated_permutations: number
+}
+
+export interface RouteOptimizationReport {
+  optimized_days: number
+  reordered_days: number
+  saved_minutes: number
+  source_counts: Record<string, number>
+  days: DayRouteOptimization[]
+}
+
+export interface LockViolation {
+  type: string
+  day_index?: number
+  attraction?: string
+  message: string
+}
+
 export interface ExecutionTraceEvent {
   id: string
   agent: string
   task: string
   tool?: string | null
-  status: 'running' | 'success' | 'failed' | 'fallback' | 'needs_revision' | 'degraded' | string
+  status: 'running' | 'success' | 'failed' | 'fallback' | 'needs_revision' | 'degraded' | 'restored' | string
   started_at: string
   finished_at?: string
   duration_ms: number
@@ -135,6 +169,9 @@ export interface ExecutionTraceEvent {
   degraded?: boolean
   validation_passed?: boolean
   validation_report?: ValidationReport
+  route_optimization?: RouteOptimizationReport
+  locks?: RevisionLocks
+  violations?: LockViolation[]
   retried_steps?: number
 }
 
@@ -144,4 +181,5 @@ export interface TripPlanResponse {
   session_id?: string
   data?: TripPlan
   execution_trace?: ExecutionTraceEvent[]
+  locks?: RevisionLocks
 }
