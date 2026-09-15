@@ -1,4 +1,4 @@
-"""多智能体任务编排、执行追踪与验证修正闭环。"""
+"""多智能体任务编排、GIS 路线优化、执行追踪与验证修正闭环。"""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 from ..config import get_settings
 from ..models.schemas import TripPlan, TripRequest
+from .gis_optimizer_service import RouteOptimizationReport, optimize_trip_routes
 from .resilience_service import AgentExecutionError, AttemptError, run_with_retry
 from .validation_service import ValidationReport, validate_trip_plan
 
@@ -100,10 +101,69 @@ def _validation_event(report: ValidationReport, *, agent_name: str, started_at: 
     }
 
 
+def _gis_event(
+    report: RouteOptimizationReport,
+    *,
+    agent_name: str,
+    started_at: str,
+    started: float,
+) -> TraceEvent:
+    report_dict = report.to_dict()
+    return {
+        "id": str(uuid.uuid4()),
+        "agent": agent_name,
+        "task": "基于 GIS 坐标与路网时间矩阵优化每日景点访问顺序",
+        "tool": "amap_route_matrix + haversine + exact_route_search",
+        "status": "success",
+        "started_at": started_at,
+        "finished_at": _utc_now(),
+        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+        "attempts": 1,
+        "error": None,
+        "error_category": None,
+        "route_optimization": report_dict,
+        "result_preview": json.dumps(report_dict, ensure_ascii=False)[:700],
+    }
+
+
+def _run_gis_optimization(
+    trip_plan: TripPlan,
+    request: TripRequest,
+    *,
+    agent_name: str,
+) -> tuple[TripPlan, TraceEvent]:
+    started_at = _utc_now()
+    started = time.perf_counter()
+    try:
+        optimized, report = optimize_trip_routes(trip_plan, request)
+        return optimized, _gis_event(
+            report,
+            agent_name=agent_name,
+            started_at=started_at,
+            started=started,
+        )
+    except Exception as exc:
+        return trip_plan, {
+            "id": str(uuid.uuid4()),
+            "agent": agent_name,
+            "task": "基于 GIS 坐标与路网时间矩阵优化每日景点访问顺序",
+            "tool": "amap_route_matrix + haversine + exact_route_search",
+            "status": "failed",
+            "started_at": started_at,
+            "finished_at": _utc_now(),
+            "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+            "attempts": 1,
+            "error": str(exc),
+            "error_category": "gis_optimization_failed",
+            "result_preview": "GIS 优化失败，保留 Planner 原始顺序并继续 Validator。",
+        }
+
+
 def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, List[TraceEvent]]:
-    """执行 fan-out/fan-in → Planner → Validator → optional Repair → Revalidate。
+    """执行 fan-out/fan-in → Planner → GIS → Validator → optional Repair → GIS → Revalidate。
 
     自动修正最多执行一次，避免 Agent 在“生成—检查—重写”之间无限循环。
+    LLM 负责语义规划，GIS 负责路线顺序，Validator 负责确定性约束检查。
     """
     settings = get_settings()
     trace: List[TraceEvent] = []
@@ -208,6 +268,13 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
     final_validation_passed = planner_event["status"] == "success"
 
     if planner_event["status"] == "success":
+        trip_plan, gis_event = _run_gis_optimization(
+            trip_plan,
+            request,
+            agent_name="GIS Route Optimizer",
+        )
+        trace.append(gis_event)
+
         validation_started_at = _utc_now()
         validation_started = time.perf_counter()
         report = validate_trip_plan(trip_plan, request, check_routes=True)
@@ -252,6 +319,13 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
                 trace.append(repair_event)
 
             if repair_event["status"] == "success":
+                trip_plan, post_gis_event = _run_gis_optimization(
+                    trip_plan,
+                    request,
+                    agent_name="Post-Repair GIS Optimizer",
+                )
+                trace.append(post_gis_event)
+
                 revalidate_started_at = _utc_now()
                 revalidate_started = time.perf_counter()
                 final_report = validate_trip_plan(trip_plan, request, check_routes=True)
@@ -274,7 +348,7 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
     trace.append({
         "id": str(uuid.uuid4()),
         "agent": "Orchestrator",
-        "task": "完成检索、规划、校验与可选自动修正",
+        "task": "完成检索、规划、GIS 优化、校验与可选自动修正",
         "tool": None,
         "status": "degraded" if degraded else "success",
         "started_at": trace[0]["started_at"] if trace else _utc_now(),
