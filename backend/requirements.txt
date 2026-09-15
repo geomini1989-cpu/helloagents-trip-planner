@@ -1,5 +1,6 @@
 # HelloAgents框架
-hello-agents[protocols]>=0.2.4
+# 当前代码使用 0.2.x 的 SimpleAgent + MCPTool API；锁定版本避免 1.x breaking changes 破坏运行时。
+hello-agents[protocols]==0.2.9
 
 # FastAPI和相关依赖
 fastapi>=0.115.0
