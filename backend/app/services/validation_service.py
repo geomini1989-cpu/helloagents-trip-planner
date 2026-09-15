@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..models.schemas import Attraction, TripPlan, TripRequest
-from .amap_service import get_amap_service
+from .route_service import get_route_service
 
 
 @dataclass
@@ -110,12 +110,12 @@ def validate_trip_plan(plan: TripPlan, request: TripRequest, *, check_routes: bo
 
     seen: Dict[str, int] = {}
     route_type = _route_type(request.transportation)
-    amap = None
+    route_service = None
     if check_routes:
         try:
-            amap = get_amap_service()
+            route_service = get_route_service()
         except Exception:
-            amap = None
+            route_service = None
 
     for day in plan.days:
         attractions = day.attractions
@@ -157,19 +157,23 @@ def validate_trip_plan(plan: TripPlan, request: TripRequest, *, check_routes: bo
             distance_km = straight_km
             source = "coordinate_estimate"
 
-            if amap is not None:
-                route = amap.plan_route(
-                    left.address or left.name,
-                    right.address or right.name,
-                    origin_city=request.city,
-                    destination_city=request.city,
-                    route_type=route_type,
-                )
-                if route.get("duration_seconds") is not None:
-                    route_minutes = max(1, round(float(route["duration_seconds"]) / 60))
-                    if route.get("distance_meters") is not None:
-                        distance_km = round(float(route["distance_meters"]) / 1000, 2)
-                    source = "amap_mcp"
+            if route_service is not None:
+                try:
+                    route = route_service.plan_route(
+                        left.address or left.name,
+                        right.address or right.name,
+                        origin_city=request.city,
+                        destination_city=request.city,
+                        route_type=route_type,
+                    )
+                    if route.get("duration_seconds") is not None:
+                        route_minutes = max(1, round(float(route["duration_seconds"]) / 60))
+                        if route.get("distance_meters") is not None:
+                            distance_km = round(float(route["distance_meters"]) / 1000, 2)
+                        source = "amap_mcp"
+                except Exception:
+                    # 路线工具失败时仍可完成校验，但必须标记为估算来源。
+                    route_minutes = None
 
             if route_minutes is None:
                 route_minutes = _estimate_minutes(straight_km, route_type)
