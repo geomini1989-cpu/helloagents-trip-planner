@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import copy
 import re
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..models.schemas import RevisionLocks
 
@@ -49,6 +49,45 @@ def _normalise(locks: RevisionLocks) -> RevisionLocks:
     )
 
 
+def _apply_day_lock_phrases(days: set[int], text: str) -> None:
+    """按每个“第X天”附近的语义判断，避免整句关键词污染其他日期。"""
+    pattern = re.compile(r"第\s*([0-9一二三四五六七八九十]{1,3})\s*天")
+    for match in pattern.finditer(text):
+        value = _parse_day_number(match.group(1))
+        if value is None:
+            continue
+        day_index = value - 1
+        before = text[max(0, match.start() - 12):match.start()]
+        after = text[match.end():min(len(text), match.end() + 16)]
+
+        prefix_unlock = re.search(r"(?:取消锁定|解除锁定|允许修改|可以修改|可以改)\s*$", before)
+        suffix_unlock = re.search(r"^.{0,4}(?:取消锁定|解除锁定|允许修改|可以修改|可以改)", after)
+        if prefix_unlock or suffix_unlock:
+            days.discard(day_index)
+            continue
+
+        prefix_lock = re.search(r"(?:锁定|不要改|不能改|不改|保留)\s*$", before)
+        suffix_lock = re.search(r"^.{0,12}(?:锁定|不要改|不能改|不改|保持不变|已确定|保留)", after)
+        if prefix_lock or suffix_lock:
+            days.add(day_index)
+
+
+def _apply_hotel_lock_phrase(current: bool, text: str) -> bool:
+    unlock_patterns = (
+        r"(?:取消锁定|解除锁定)\s*(?:酒店|住宿)",
+        r"(?:酒店|住宿).{0,4}(?:可以修改|可以改|允许修改)",
+    )
+    lock_patterns = (
+        r"(?:锁定|保留)\s*(?:酒店|住宿)",
+        r"(?:酒店|住宿).{0,8}(?:不要改|不能改|不改|保持不变|已确定|锁定)",
+    )
+    if any(re.search(pattern, text) for pattern in unlock_patterns):
+        return False
+    if any(re.search(pattern, text) for pattern in lock_patterns):
+        return True
+    return current
+
+
 def merge_revision_locks(
     existing: RevisionLocks | Dict[str, Any] | None,
     feedback: str,
@@ -67,31 +106,12 @@ def merge_revision_locks(
         lock_hotels = lock_hotels or explicit.lock_all_hotels
 
     text = feedback or ""
-    lower = text.lower()
-    unlock_mode = any(keyword in text for keyword in ("取消锁定", "解除锁定", "可以修改"))
-    lock_mode = any(keyword in text for keyword in ("锁定", "不要改", "不能改", "不改", "保持不变", "已确定", "保留"))
+    _apply_day_lock_phrases(days, text)
+    lock_hotels = _apply_hotel_lock_phrase(lock_hotels, text)
 
-    day_matches = re.findall(r"第\s*([0-9一二三四五六七八九十]{1,3})\s*天", text)
-    parsed_days = {
-        value - 1
-        for token in day_matches
-        if (value := _parse_day_number(token)) is not None
-    }
-    if unlock_mode:
-        days.difference_update(parsed_days)
-    elif lock_mode:
-        days.update(parsed_days)
-
-    hotel_mentioned = "酒店" in text or "住宿" in text or "hotel" in lower
-    if hotel_mentioned:
-        if unlock_mode:
-            lock_hotels = False
-        elif lock_mode:
-            lock_hotels = True
-
-    # 支持“锁定景点：故宫、天坛”这种明确表达；复杂实体抽取仍留给后续 UI/API 显式传参。
+    # 支持“锁定景点：故宫、天坛”这种明确表达；复杂实体抽取由显式 API/UI 负责。
     attraction_match = re.search(r"(?:锁定景点|保留景点)\s*[:：]\s*([^。；;\n]+)", text)
-    if attraction_match and not unlock_mode:
+    if attraction_match:
         for name in re.split(r"[,，、]", attraction_match.group(1)):
             if name.strip():
                 attractions.add(name.strip())
@@ -193,7 +213,6 @@ def enforce_revision_locks(
             "message": f"景点“{name}”已锁定，Agent 修改结果被恢复到原日期与内容。",
         })
 
-        # 移除修改结果中同名景点，防止重复，再恢复原对象和原位置。
         target = name.strip().casefold()
         for day in protected.get("days", []):
             day["attractions"] = [
