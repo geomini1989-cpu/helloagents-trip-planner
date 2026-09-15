@@ -7,7 +7,7 @@
     "transportation": "公共交通",
     "accommodation": "舒适型酒店",
     "preferences": ["历史文化", "美食"],
-    "free_text_input": "希望安排博物馆和经典历史景点，节奏不要太赶",
+    "free_text_input": "希望安排博物馆和经典历史景点，节奏不要太赶，总预算控制在2500元以内，每天最多3个景点",
     "expected_min_attractions": 2,
     "require_budget": true,
     "require_weather": true
@@ -21,6 +21,12 @@
     "accommodation": "经济型酒店",
     "preferences": ["艺术", "美食"],
     "free_text_input": "偏好美术馆、城市街区和本地餐饮",
+    "constraints": {
+      "max_budget": 1800,
+      "max_daily_attractions": 3,
+      "max_daily_visit_minutes": 480,
+      "max_route_minutes": 60
+    },
     "expected_min_attractions": 2,
     "require_budget": true,
     "require_weather": true
@@ -33,7 +39,7 @@
     "transportation": "公共交通",
     "accommodation": "舒适型酒店",
     "preferences": ["美食", "休闲"],
-    "free_text_input": "想体验早茶、老城区和珠江沿线，减少购物安排",
+    "free_text_input": "想体验早茶、老城区和珠江沿线，减少购物安排，单段交通不要超过45分钟",
     "expected_min_attractions": 2,
     "require_budget": true,
     "require_weather": true
@@ -46,7 +52,7 @@
     "transportation": "公共交通",
     "accommodation": "经济型酒店",
     "preferences": ["美食", "自然风光"],
-    "free_text_input": "希望包含熊猫基地，并留出轻松吃饭和散步的时间",
+    "free_text_input": "希望包含熊猫基地，并留出轻松吃饭和散步的时间，每天游览最多6小时",
     "expected_min_attractions": 2,
     "require_budget": true,
     "require_weather": true
@@ -60,6 +66,12 @@
     "accommodation": "舒适型酒店",
     "preferences": ["历史文化"],
     "free_text_input": "优先安排代表性历史景点，避免一天跨城往返",
+    "constraints": {
+      "max_budget": 1600,
+      "max_daily_attractions": 3,
+      "max_daily_visit_minutes": 480,
+      "max_route_minutes": 50
+    },
     "expected_min_attractions": 2,
     "require_budget": true,
     "require_weather": true
@@ -72,7 +84,7 @@
     "transportation": "步行",
     "accommodation": "民宿",
     "preferences": ["自然风光", "休闲"],
-    "free_text_input": "以西湖周边为主，路线尽量紧凑，减少长距离移动",
+    "free_text_input": "以西湖周边为主，路线尽量紧凑，减少长距离移动，单段步行不超过40分钟",
     "expected_min_attractions": 2,
     "require_budget": true,
     "require_weather": true
@@ -85,7 +97,7 @@
     "transportation": "公共交通",
     "accommodation": "经济型酒店",
     "preferences": ["历史文化", "自然风光"],
-    "free_text_input": "历史景点和城市公园各占一部分，行程适合第一次来南京的人",
+    "free_text_input": "历史景点和城市公园各占一部分，行程适合第一次来南京的人，总预算不超过2000元",
     "expected_min_attractions": 2,
     "require_budget": true,
     "require_weather": true
@@ -98,7 +110,7 @@
     "transportation": "公共交通",
     "accommodation": "舒适型酒店",
     "preferences": ["艺术", "购物"],
-    "free_text_input": "希望包含现代城市空间和艺术场馆，控制通勤时间",
+    "free_text_input": "希望包含现代城市空间和艺术场馆，控制通勤时间，每天最多2个景点",
     "expected_min_attractions": 2,
     "require_budget": true,
     "require_weather": true
