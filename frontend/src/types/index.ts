@@ -87,9 +87,23 @@ export interface TripFormData {
   free_text_input: string
 }
 
+export interface ExecutionTraceEvent {
+  id: string
+  agent: string
+  task: string
+  tool?: string | null
+  status: 'running' | 'success' | 'failed' | 'fallback' | string
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  error?: string | null
+  result_preview?: string
+}
+
 export interface TripPlanResponse {
   success: boolean
   message: string
+  session_id?: string
   data?: TripPlan
+  execution_trace?: ExecutionTraceEvent[]
 }
-
