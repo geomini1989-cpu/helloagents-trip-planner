@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Generic, List, Optional, TypeVar
+from typing import Callable, List, Optional, Set, TypeVar
 
 
 T = TypeVar("T")
@@ -60,12 +60,15 @@ def run_with_retry(
     *,
     max_retries: int = 2,
     backoff_seconds: float = 0.5,
+    retry_categories: Optional[Set[str]] = None,
     on_attempt_error: Optional[Callable[[AttemptError], None]] = None,
 ) -> tuple[T, int, List[AttemptError]]:
     """执行函数并按统一策略重试。
 
-    `max_retries=2` 表示最多执行 3 次。认证和本地校验类错误不会重试；
-    网络、限流、超时和未分类 Agent 错误会按线性退避重试。
+    `max_retries=2` 表示最多执行 3 次。默认使用异常分类器给出的 retryable；
+    调用方也可以传入 `retry_categories` 覆盖策略。例如 Planner 可以把
+    `validation` 加入重试集合，因为模型偶发生成非法 JSON 时重新生成是合理的。
+    认证错误始终不会重试。
     """
     errors: List[AttemptError] = []
     total_attempts = max_retries + 1
@@ -74,7 +77,13 @@ def run_with_retry(
         try:
             return runner(), attempt, errors
         except Exception as exc:
-            category, retryable = classify_exception(exc)
+            category, default_retryable = classify_exception(exc)
+            retryable = default_retryable
+            if retry_categories is not None:
+                retryable = category in retry_categories
+            if category == "auth":
+                retryable = False
+
             attempt_error = AttemptError(
                 attempt=attempt,
                 category=category,
@@ -94,10 +103,9 @@ def run_with_retry(
                     errors=errors,
                 ) from exc
 
-            # 简单、可预测的退避策略，便于 Eval 与 Trace 分析。
+            # 简单、可预测的线性退避，便于 Eval 与 Trace 分析。
             time.sleep(backoff_seconds * attempt)
 
-    # 理论上不会触达，仅用于满足类型检查。
     raise AgentExecutionError(
         "agent execution failed",
         category="agent_error",
