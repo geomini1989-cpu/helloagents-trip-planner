@@ -1,7 +1,7 @@
 """多智能体任务编排与执行追踪。
 
-这一层刻意与具体 Agent 实现解耦：Agent 负责完成单个专业任务，
-Orchestrator 负责并发调度、错误隔离、耗时统计以及最终汇总。
+Agent 负责完成单个专业任务；Orchestrator 负责并发调度、错误隔离、
+重试策略、耗时统计以及最终汇总。
 """
 
 from __future__ import annotations
@@ -12,7 +12,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Tuple
 
+from ..config import get_settings
 from ..models.schemas import TripPlan, TripRequest
+from .resilience_service import AgentExecutionError, AttemptError, run_with_retry
 
 
 TraceEvent = Dict[str, Any]
@@ -22,6 +24,18 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _errors_to_dict(errors: List[AttemptError]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "attempt": item.attempt,
+            "category": item.category,
+            "message": item.message,
+            "retryable": item.retryable,
+        }
+        for item in errors
+    ]
+
+
 def _run_step(
     *,
     agent_name: str,
@@ -29,7 +43,8 @@ def _run_step(
     tool: str | None,
     runner: Callable[[], str],
 ) -> Tuple[str, TraceEvent]:
-    """运行一个 Agent 步骤，并把运行状态转换为统一 trace。"""
+    """运行一个检索 Agent，并转换为统一、可评估的 trace 事件。"""
+    settings = get_settings()
     event: TraceEvent = {
         "id": str(uuid.uuid4()),
         "agent": agent_name,
@@ -38,32 +53,44 @@ def _run_step(
         "status": "running",
         "started_at": _utc_now(),
         "duration_ms": 0,
+        "attempts": 0,
         "error": None,
+        "error_category": None,
+        "retry_errors": [],
     }
     started = time.perf_counter()
 
     try:
-        result = runner()
+        result, attempts, retry_errors = run_with_retry(
+            runner,
+            max_retries=settings.agent_max_retries,
+            backoff_seconds=settings.agent_retry_backoff_seconds,
+        )
+        event["attempts"] = attempts
+        event["retry_errors"] = _errors_to_dict(retry_errors)
         event["status"] = "success"
-        # Trace 只保留短摘要，避免把完整模型输出重复塞进 API。
         event["result_preview"] = str(result)[:240]
         return result, event
-    except Exception as exc:
+    except AgentExecutionError as exc:
         event["status"] = "failed"
+        event["attempts"] = exc.attempts
         event["error"] = str(exc)
-        # 单个检索 Agent 失败时不直接让整个任务崩溃，交由 Planner 决定如何降级。
-        return f"{agent_name}执行失败：{exc}", event
+        event["error_category"] = exc.category
+        event["retry_errors"] = _errors_to_dict(exc.errors)
+        # 单个检索 Agent 失败时不让整个任务直接崩溃；Planner 会拿到明确的失败上下文。
+        return f"{agent_name}执行失败（{exc.category}）：{exc}", event
     finally:
         event["duration_ms"] = round((time.perf_counter() - started) * 1000, 2)
         event["finished_at"] = _utc_now()
 
 
 def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, List[TraceEvent]]:
-    """并发执行检索型 Agent，汇总后再交给 Planner Agent。
+    """并发执行检索型 Agent，fan-in 后交给 Planner Agent。
 
-    Attraction / Weather / Hotel 三个任务互不依赖，因此可以并行；
-    Planner 必须等待三者结果后再执行，形成明确的 fan-out / fan-in 任务图。
+    Attraction / Weather / Hotel 三个任务没有数据依赖，因此并发执行；
+    Planner 等待三者结果后再生成最终结构化 TripPlan。
     """
+    settings = get_settings()
     trace: List[TraceEvent] = []
     total_started = time.perf_counter()
 
@@ -94,7 +121,6 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
 
     results: Dict[str, str] = {}
 
-    # 三个信息检索任务没有数据依赖，使用线程池降低整体等待时间。
     with ThreadPoolExecutor(max_workers=3, thread_name_prefix="trip-agent") as executor:
         future_to_key = {
             executor.submit(
@@ -113,7 +139,7 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
             results[key] = result
             trace.append(event)
 
-    # 保证前端展示顺序稳定，不受线程完成先后影响。
+    # 保证 Trace 展示顺序稳定，不受线程完成先后影响。
     order = {"Attraction Agent": 0, "Weather Agent": 1, "Hotel Agent": 2}
     trace.sort(key=lambda item: order.get(item["agent"], 99))
 
@@ -125,29 +151,52 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
         "status": "running",
         "started_at": _utc_now(),
         "duration_ms": 0,
+        "attempts": 0,
         "error": None,
+        "error_category": None,
+        "retry_errors": [],
     }
     planner_started = time.perf_counter()
 
+    planner_query = planner._build_planner_query(
+        request,
+        results.get("attractions", ""),
+        results.get("weather", ""),
+        results.get("hotels", ""),
+    )
+
+    def _planner_once() -> tuple[str, TripPlan]:
+        # 使用 request=None 让结构化解析失败直接抛出，从而有机会重新生成；
+        # 所有重试耗尽后才进入最终 fallback。
+        response = planner.planner_agent.run(planner_query)
+        parsed = planner._parse_response(response, request=None)
+        return response, parsed
+
     try:
-        planner_query = planner._build_planner_query(
-            request,
-            results.get("attractions", ""),
-            results.get("weather", ""),
-            results.get("hotels", ""),
+        (planner_response, trip_plan), attempts, retry_errors = run_with_retry(
+            _planner_once,
+            max_retries=settings.agent_max_retries,
+            backoff_seconds=settings.agent_retry_backoff_seconds,
+            retry_categories={"timeout", "rate_limit", "network", "agent_error", "validation"},
         )
-        planner_response = planner.planner_agent.run(planner_query)
-        trip_plan = planner._parse_response(planner_response, request)
+        planner_event["attempts"] = attempts
+        planner_event["retry_errors"] = _errors_to_dict(retry_errors)
         planner_event["status"] = "success"
         planner_event["result_preview"] = str(planner_response)[:240]
-    except Exception as exc:
+    except AgentExecutionError as exc:
         planner_event["status"] = "fallback"
+        planner_event["attempts"] = exc.attempts
         planner_event["error"] = str(exc)
+        planner_event["error_category"] = exc.category
+        planner_event["retry_errors"] = _errors_to_dict(exc.errors)
         trip_plan = planner._create_fallback_plan(request)
     finally:
         planner_event["duration_ms"] = round((time.perf_counter() - planner_started) * 1000, 2)
         planner_event["finished_at"] = _utc_now()
         trace.append(planner_event)
+
+    degraded = any(item["status"] in {"failed", "fallback"} for item in trace)
+    retried_steps = sum(1 for item in trace if int(item.get("attempts", 1) or 1) > 1)
 
     trace.append(
         {
@@ -159,7 +208,11 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
             "started_at": trace[0]["started_at"] if trace else _utc_now(),
             "finished_at": _utc_now(),
             "duration_ms": round((time.perf_counter() - total_started) * 1000, 2),
+            "attempts": 1,
             "error": None,
+            "error_category": None,
+            "degraded": degraded,
+            "retried_steps": retried_steps,
         }
     )
 
