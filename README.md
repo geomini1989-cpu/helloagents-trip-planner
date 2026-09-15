@@ -2,36 +2,36 @@
 
 一个面向真实旅行规划场景的 **Multi-Agent AI Application**。
 
-项目基于 HelloAgents 构建专职 Agent，通过 **MCP（Model Context Protocol）** 接入高德地图能力，并使用 FastAPI + Vue 3 完成任务编排、真实工具调用、GIS 路线优化、结构化约束、确定性校验、自动修正、会话持久化、局部修改保护、执行追踪与 Agent Eval。
+项目不是让大模型直接生成旅行文案，而是让 Agent 在 **真实工具、空间数据、硬约束、确定性规则和反馈闭环** 下完成旅行规划。
 
-> 重点不是“让大模型生成一段旅行文案”，而是让 Agent 在 **真实工具、空间数据、硬约束、确定性规则和反馈闭环** 下完成旅行规划任务。
+基于 **HelloAgents + MCP + FastAPI + Vue 3 + AMap GIS**，覆盖多 Agent 编排、真实工具调用、GIS 路线优化、约束校验、自动修正、会话持久化、局部修改保护、Execution Trace 与 Agent Eval。
 
-## Highlights
+## Why This Project
 
-- **Multi-Agent Decomposition**：Attraction / Weather / Hotel / Planner 职责拆分
-- **Parallel Orchestration**：检索 Agent 使用 fan-out / fan-in 并行执行
-- **MCP Tool Calling**：通过高德地图 MCP 获取 POI、天气和路线数据
-- **Structured Constraints**：预算、每日景点数、游览时长、单段交通时长转为硬约束
-- **Natural-language Constraint Extraction**：支持“预算 2000 元以内”“每天最多 2 个景点”等自然语言要求
-- **GIS Route Optimizer**：将景点经纬度与高德路网时间转换为成本矩阵，确定性优化每日访问顺序
-- **Network + Spatial Fallback**：真实路网不可用时使用 Haversine 空间距离估算，并显式记录数据来源
-- **Deterministic Trip Validator**：检查预算、每日强度、重复景点、路线耗时等可明确判断的问题
-- **Validate → Repair → GIS → Revalidate**：初稿不合格时触发一次最小自动修正，重新优化路线后再次校验
-- **Persistent Revision Locks**：支持锁定日期、酒店和指定景点，锁定状态持久化到 Session
-- **Deterministic Lock Guard**：即使 Revision Agent 误改锁定内容，后端也会检测、恢复并写入 Trace
-- **Reliability Policy**：异常分类、有限重试、退避与显式 fallback
-- **Request-scoped Agents**：避免 SimpleAgent history 跨请求污染
-- **Persistent Session**：SQLite 保存计划、历史版本、Revision Locks 和 Execution Trace
-- **Observability**：Trace 页面展示 Agent / Tool / Retry / GIS / Validator / Repair / Lock Guard / Latency
-- **Deterministic Eval**：衡量生成成功率、工具成功率、验证通过率、修正成功率和延迟
-- **CI**：自动执行 Python compile、单元测试和 Vue/TypeScript build
+一个旅行计划同时包含两类问题：
 
-## Architecture
+```text
+语义问题：去哪里、怎么玩、用户喜欢什么
+确定性问题：预算是否超标、路线是否合理、已确认内容能不能被改
+```
+
+因此本项目没有把所有事情都交给 LLM：
+
+```text
+LLM       → 理解意图、选择内容、生成/修正计划
+MCP       → 获取真实 POI / 天气 / 路线数据
+GIS       → 计算空间成本并优化访问顺序
+Validator → 检查明确可计算的硬约束
+Lock Guard→ 保护用户已经确认的内容
+Trace     → 解释系统执行过程
+Eval      → 衡量系统是否真的工作
+```
+
+## Core Workflow
 
 ```mermaid
 flowchart TD
-    U[User] --> API[FastAPI]
-    API --> C[Constraint Normalizer]
+    U[User] --> C[Constraint Normalizer]
     C --> O[Orchestrator]
 
     O -->|parallel| A[Attraction Agent]
@@ -49,340 +49,125 @@ flowchart TD
 
     P --> T[Typed TripPlan]
     T --> GIS[GIS Route Optimizer]
-    GIS --> RM[AMap Route Matrix / Haversine]
     GIS --> V[Deterministic Validator]
 
-    V -->|passed| DB[(SQLite Session Store)]
-    V -->|blocking issues| R[Repair Agent]
-    R --> GIS2[Post-Repair GIS Optimizer]
-    GIS2 --> V2[Post-Repair Validator]
+    V -->|pass| DB[(SQLite Session)]
+    V -->|blocking issue| R[Repair Agent]
+    R --> GIS2[Post-Repair GIS]
+    GIS2 --> V2[Revalidate]
     V2 --> DB
 
     DB --> REV[Revision Agent]
     REV --> LG[Revision Lock Guard]
     LG --> DB
 
-    O --> TRACE[Execution Trace]
-    TRACE --> DB
     DB --> FE[Vue Result / Trace UI]
 ```
 
-## Planning Workflow
+自动 Repair 最多执行一次，避免 Agent 在生成与审查之间无限循环。
+
+## Highlights
+
+### Multi-Agent Orchestration
+
+Attraction / Weather / Hotel Agent 并行检索，完成后 fan-in 到 Planner。每个请求创建独立 Agent 上下文，避免历史消息跨用户或跨 Eval case 污染。
+
+### Real MCP Tool Calling
+
+通过高德地图 MCP 获取 POI、天气和路线信息。工具失败会进入统一错误分类、有限重试和显式 fallback，不伪造成功结果。
+
+### Structured Constraints
+
+支持把明确要求转换成硬约束，例如：
 
 ```text
-User Request
-    ↓
-Constraint Normalizer
-    ↓
-Orchestrator
-    ├── Attraction Agent ── AMap MCP ─┐
-    ├── Weather Agent ───── AMap MCP ─┼── parallel
-    └── Hotel Agent ─────── AMap MCP ─┘
-                    ↓ fan-in
-               Planner Agent
-                    ↓
-               Typed TripPlan
-                    ↓
-            GIS Route Optimizer
-                    ↓
-              Trip Validator
-        ┌───────────┴───────────┐
-      passed                blocking issues
-        ↓                         ↓
-   Final Plan                Repair Agent
-                                  ↓
-                         Post-Repair GIS
-                                  ↓
-                         Post-Repair Validator
-                                  ↓
-                              Final Plan
+总预算不超过 2500 元
+每天最多 3 个景点
+每天游览最多 6 小时
+单段交通不要超过 45 分钟
 ```
 
-自动 Repair 最多执行一次，避免 Agent 在“生成 → 校验 → 重写”之间无限循环。
+这些约束不仅进入 Prompt，还会被后端 Validator 再次检查。
 
-## GIS Route Optimization
+### GIS Route Optimizer
 
-旅行计划里“去哪些地方”和“按什么顺序去”不是同一类问题。
-
-本项目让 LLM 负责语义规划，而把路线排序交给确定性 GIS / 路网层：
+Planner 决定“去哪些地方”，GIS 层决定“按什么顺序去”。
 
 ```text
-Planner 选择景点集合
-        ↓
-经纬度 Geo Points
-        ↓
+POI coordinates
+      ↓
 Directed Cost Matrix
-   ├─ AMap Route Time
-   └─ Haversine Fallback
-        ↓
-Exact Route Search
-        ↓
-更低交通成本的访问顺序
+ ├─ AMap route time
+ └─ Haversine fallback
+      ↓
+Route Search
+      ↓
+Lower-cost visit order
 ```
 
-对于常见的每天 2–3 个景点，候选数量很小，因此直接枚举所有访问顺序，选择总交通时间最低的顺序，而不是让 LLM 猜测“哪个景点离哪个更近”。
+对常见的每日 2–3 个景点直接枚举候选访问顺序，选择交通总成本更低的方案，并记录优化前后时间与数据来源。
 
-例如原始计划：
-
-```text
-A → B → C
-预计交通 120 min
-```
-
-路网成本矩阵发现：
-
-```text
-A → C → B
-预计交通 20 min
-```
-
-则 GIS Optimizer 会确定性重排，并在 Trace 记录：
-
-```text
-original_order
-optimized_order
-before_minutes
-after_minutes
-saved_minutes
-source_counts
-evaluated_permutations
-```
-
-为避免景点数量异常时产生大量 MCP 调用：
-
-- 每日景点数 ≤ 5：优先构建真实 AMap 路网成本矩阵
-- 每日景点数 > 5：使用坐标空间距离估算做排序
-- 最终 Validator 仍会对实际相邻路段进行路线校验
-
-当前默认硬约束每天最多 3 个景点，因此正常场景通常会使用真实路网矩阵。
-
-## Structured Constraints
-
-API 可以直接传递结构化约束：
-
-```json
-{
-  "city": "北京",
-  "start_date": "2026-10-01",
-  "end_date": "2026-10-03",
-  "travel_days": 3,
-  "transportation": "公共交通",
-  "accommodation": "舒适型酒店",
-  "preferences": ["历史文化", "美食"],
-  "constraints": {
-    "max_budget": 2500,
-    "max_daily_attractions": 3,
-    "max_daily_visit_minutes": 480,
-    "max_route_minutes": 60
-  }
-}
-```
-
-普通用户也可以直接写：
-
-```text
-总预算控制在 2500 元以内，每天最多 3 个景点，单段交通不要超过 45 分钟。
-```
-
-后端只提取能明确量化的要求，不会把模糊偏好强行转换成硬约束。
-
-## Deterministic Validator
+### Validate → Repair → Revalidate
 
 Validator 当前检查：
 
-- 行程天数与请求是否一致
-- 总预算是否超过上限
-- 每天景点数量是否过多
-- 每日景点游览总时长是否过高
-- 是否重复安排同一景点
-- GIS 优化后的相邻景点交通耗时是否超过限制
-- 路线数据来自真实 AMap MCP 还是坐标估算 fallback
+- 行程天数
+- 总预算
+- 每日景点数量
+- 每日游览时长
+- 重复景点
+- 相邻景点交通时间
+- 路线数据真实来源 / fallback 状态
 
-与单纯让另一个 LLM “自己检查一下”不同，这些规则可以重复执行、自动测试，也可以进入 Eval。
+存在 blocking issue 时触发一次最小范围 Repair，之后重新进行 GIS 优化与校验。如果仍未解决，结果标记为 degraded，而不是假装完全成功。
 
-## Validate → Repair → GIS → Revalidate
+### Persistent Revision Locks
 
-Planner 初稿出现硬冲突时，Repair Agent 会获得：
-
-```text
-当前 TripPlan
-+ Structured Constraints
-+ Validator Blocking Issues
-```
-
-Repair Prompt 明确要求 **最小范围修改**，而不是重新自由规划整个行程。
-
-由于 Repair 可能改变景点集合或顺序，修正后不是直接返回，而是再次执行：
-
-```text
-Repair Agent
-    ↓
-GIS Route Optimizer
-    ↓
-Post-Repair Validator
-```
-
-如果仍然不通过，Orchestrator 会标记：
-
-```text
-status = degraded
-validation_passed = false
-```
-
-系统不会把未解决的冲突伪装成完全成功。
-
-## Revision Locks
-
-自然语言局部修改支持持久化锁定，例如：
+支持：
 
 ```text
 第一天和酒店已经确定，不要改，把第三天改轻松一点。
 ```
 
-后端会解析成类似：
+锁定状态可以覆盖指定日期、全部酒店和指定景点，并持久化到 Session。
 
-```json
-{
-  "locked_day_indexes": [0],
-  "lock_all_hotels": true,
-  "locked_attraction_names": []
-}
-```
+Revision Agent 会先收到锁定要求；随后 Deterministic Lock Guard 再比较修改前后数据。即使模型误改锁定内容，后端也会恢复原值并把 violation 写入 Trace。
 
-Revision Agent 在 Prompt 中会收到这些锁，但系统不会只相信模型遵守规则。
+### Execution Trace
 
-修改完成后，`Revision Lock Guard` 会确定性比较修改前后数据：
+Trace 页面可以展示：
 
 ```text
-Original Plan
-     +
-Revision Candidate
-     +
-Persistent Locks
-     ↓
-Revision Lock Guard
-     ↓
-restore locked fields if changed
-```
-
-如果 Agent 误改了锁定内容：
-
-1. 后端恢复原值；
-2. 修改其他未锁定部分仍然保留；
-3. violation 写入 Execution Trace；
-4. 锁定状态继续保存在 SQLite Session 中。
-
-也可以显式调用：
-
-```text
-PUT /api/trip/session/{session_id}/locks
-```
-
-支持锁定：
-
-- 指定日期
-- 所有酒店 / 住宿
-- 指定景点
-
-## Reliability
-
-统一异常类别：
-
-```text
-timeout
-rate_limit
-network
-auth
-validation
-agent_error
-```
-
-默认：
-
-```env
-AGENT_MAX_RETRIES=2
-AGENT_RETRY_BACKOFF_SECONDS=0.5
-```
-
-- timeout / network / rate limit：允许有限重试
-- auth：不重试
-- Planner JSON / Pydantic validation：允许重新生成
-- 所有尝试耗尽后才进入 fallback
-
-Fallback 不会伪造景点、天气或坐标，而是返回明确的降级结果。
-
-## Execution Trace
-
-一次完整生成请求可以包含：
-
-```text
-Attraction Agent ┐
-Weather Agent    ├── parallel
-Hotel Agent      ┘
-       ↓
-Planner Agent
-       ↓
+Attraction / Weather / Hotel
+        ↓
+Planner
+        ↓
 GIS Route Optimizer
-       ↓
-Trip Validator
-       ↓ (if needed)
-Repair Agent
-       ↓
-Post-Repair GIS Optimizer
-       ↓
-Post-Repair Validator
-       ↓
-Orchestrator
+        ↓
+Validator
+        ↓
+Repair (if needed)
+        ↓
+Post-Repair GIS / Validator
 ```
 
-局部修改时还会追加：
+并记录 latency、attempts、retry、error category、route source、GIS before/after、validation issues、lock violations 和 degraded state。
 
-```text
-Revision Agent
-      ↓
-Revision Lock Guard
-```
+### Agent Eval + CI
 
-事件可包含：
+离线 CI 自动执行：
 
-```text
-status
-latency
-attempts
-retry history
-error category
-tool name
-validation issues
-route source
-route optimization before/after
-lock violations
-degraded state
-```
+- Python compile
+- pytest unit tests
+- Vue / TypeScript build
 
-## Agent Eval
-
-运行：
-
-```bash
-cd backend
-python -m evals.run_eval
-```
-
-只跑前三条：
-
-```bash
-python -m evals.run_eval --limit 3
-```
-
-当前聚合指标包括：
+真实 Agent Eval 可以衡量：
 
 ```text
 case_pass_rate
-average_check_score
 structured_output_success_rate
 retrieval_agent_success_rate
 validation_pass_rate
-repair_trigger_rate
 repair_success_rate
 fallback_rate
 agent_step_retry_rate
@@ -390,41 +175,24 @@ average_latency_ms
 p95_latency_ms
 ```
 
-README 不预填任何虚构成绩；只有真实环境完成 Eval 后才应该把指标写进简历。
-
-## Persistent Session
-
-SQLite 保存：
-
-```text
-session_id
-current_plan
-history
-execution_trace
-locks
-created_at
-updated_at
-```
-
-旧版本进入 `history`，Revision / Lock Guard Trace 追加到 Session，锁定状态跨页面刷新和服务重启仍可恢复。
+仓库不预填虚构指标；只有真实 LLM + AMap 环境跑出的结果才应该用于 README 或简历。
 
 ## Tech Stack
 
-### Agent / Backend
+**Agent / Backend**
 
 - Python
 - HelloAgents / SimpleAgent
 - MCPTool / Model Context Protocol
-- AMap MCP Server
-- FastAPI
-- Pydantic
+- AMap MCP
+- FastAPI / Pydantic
 - SQLite
 - GIS / Haversine distance
-- Exact route permutation search
+- exact route permutation search
 - ThreadPoolExecutor
 - pytest
 
-### Frontend
+**Frontend**
 
 - Vue 3
 - TypeScript
@@ -440,11 +208,8 @@ multi-agent-trip-planner/
 ├── backend/
 │   ├── app/
 │   │   ├── agents/
-│   │   │   └── trip_planner_agent.py
 │   │   ├── api/routes/
-│   │   │   └── trip.py
 │   │   ├── models/
-│   │   │   └── schemas.py
 │   │   └── services/
 │   │       ├── orchestration_service.py
 │   │       ├── constraint_service.py
@@ -455,20 +220,24 @@ multi-agent-trip-planner/
 │   │       ├── resilience_service.py
 │   │       └── session_service.py
 │   ├── evals/
-│   │   ├── cases.json
-│   │   └── run_eval.py
 │   └── tests/
 ├── frontend/
 │   └── src/views/
 │       ├── Home.vue
 │       ├── Result.vue
 │       └── Trace.vue
-└── .github/workflows/ci.yml
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── EVALUATION.md
+│   └── ROADMAP.md
+└── .github/workflows/
+    ├── ci.yml
+    └── live-eval.yml
 ```
 
 ## Quick Start
 
-Backend：
+### Backend
 
 ```bash
 cd backend
@@ -479,7 +248,7 @@ cp .env.example .env
 uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Frontend：
+### Frontend
 
 ```bash
 cd frontend
@@ -488,120 +257,55 @@ cp .env.example .env
 npm run dev
 ```
 
-## Engineering Decisions
+## Evaluation
 
-### Why GIS route optimization instead of asking the LLM to sort POIs?
+本地运行完整 Eval：
 
-LLM 擅长理解旅行偏好、景点语义和用户意图，但路程距离、路网耗时和访问顺序属于可以明确计算的空间优化问题。
-
-因此当前职责拆分是：
-
-```text
-LLM       → what to visit
-GIS/MCP   → travel cost
-Algorithm → visit order
-Validator → whether constraints are satisfied
+```bash
+cd backend
+python -m evals.run_eval
 ```
 
-相比让模型根据地名猜距离，这种方式更可解释、可测试，也能直接量化优化前后的交通成本。
+只跑前三条：
 
-### Why deterministic validation instead of another Reviewer LLM?
-
-预算、数量、耗时、重复景点、路线时长等问题都有可明确判断的规则。
-
-对于这些问题，确定性 Validator 更：
-
-- 可重复
-- 可解释
-- 可测试
-- 可进入 CI / Eval
-- 不增加额外 Judge 模型的不确定性
-
-LLM 负责生成与修正，代码负责判断明确约束是否满足。
-
-### Why deterministic Lock Guard?
-
-在 Prompt 中告诉 Agent “不要改第一天”属于软约束，不能证明模型一定遵守。
-
-因此系统采用：
-
-```text
-Prompt-aware Revision
-        +
-Deterministic Post-check
+```bash
+python -m evals.run_eval --limit 3
 ```
 
-Agent 可以负责理解用户修改意图，但最终锁定数据是否被改动由代码比较和恢复。
+GitHub Actions 中还提供 `Live Agent Eval` 工作流。真实评估需要配置模型和高德相关 Actions Secrets；缺少密钥时会明确跳过 live case，不会把 mock/空跑当成真实指标。
 
-### Why only one automatic repair?
+## Documentation
 
-无限 Planner ↔ Reviewer 循环会增加成本、延迟和不可预测性。
+- [Architecture](docs/ARCHITECTURE.md) — Agent 分工、GIS、Validator、Repair、Locks、Reliability 与架构取舍
+- [Evaluation & Testing](docs/EVALUATION.md) — 离线测试、Live Eval、指标定义和结果使用原则
+- [Roadmap](docs/ROADMAP.md) — 当前完成度与后续优先级
 
-当前策略是：
+## Current Status
 
-```text
-Generate → GIS → Validate → one Repair → GIS → Revalidate
-```
-
-如果仍不通过，就显式 degraded，而不是继续无限调用模型。
-
-### Why not A2UI now?
-
-当前 UI 的核心结构稳定：行程、天气、酒店、预算、地图、Trace。
-
-这里主要是 **业务数据动态**，不是 **UI 结构动态**，因此当前选择：
+核心 Agent 功能已经形成闭环：
 
 ```text
-Typed TripPlan
-    ↓
-Deterministic Vue Components
+User Constraints
+→ Multi-Agent Retrieval
+→ Planner
+→ GIS Optimization
+→ Deterministic Validation
+→ Automatic Repair
+→ Revalidation
+→ Persistent Session
+→ Revision Locks
+→ Execution Trace
+→ Eval
 ```
 
-当项目未来演进成通用 Travel Agent Workspace，需要根据任务动态产生 Comparison Table、Approval Form、Budget Editor 等不同 Surface 时，再引入 A2UI 更合理。
+离线 Backend / Frontend CI 已可稳定验证代码；下一阶段重点不是继续增加 Agent 或 UI 协议，而是配置真实环境跑 Live Eval，建立可重复基线，再针对真实 failure cases 优化。
 
-## Current Boundaries
+## Design Boundary
 
-- Tool Calling 仍依赖当前 HelloAgents 的调用约定，后续可升级 typed/native tool calling
-- AMap route MCP 输出存在版本差异，因此保留 Haversine fallback
-- GIS Optimizer 当前重点优化“每天景点之间”的访问顺序，尚未把酒店→首站→末站→酒店作为完整闭环路径优化
-- 每日 > 5 个景点时不会构建完整路网矩阵，以避免 O(n²) 外部工具调用；正常默认约束为每天最多 3 个景点
-- Agent 路由仍是固定 DAG，不是动态 Coordinator
-- Session Store 使用 SQLite，尚未面向多实例部署
-- Eval 以确定性规则为主，尚未加入主观旅行体验 rubric
-- Trace 尚未记录完整 token usage / LLM span
+当前没有引入 A2UI。原因是旅行结果页面结构稳定，动态的是业务数据而不是 UI schema；Typed TripPlan + deterministic Vue rendering 更简单、更容易测试。
 
-## Roadmap
+如果未来产品演进成通用 Travel Agent Workspace，需要 Agent 在比较表、审批表单、预算编辑器、动态任务面板等不同交互 Surface 间动态选择，再重新评估 A2UI。
 
-- [x] Multi-Agent decomposition
-- [x] MCP tool calling
-- [x] Parallel fan-out / fan-in orchestration
-- [x] Structured TripPlan
-- [x] Request-scoped Agent isolation
-- [x] Retry / backoff / error classification
-- [x] SQLite session persistence
-- [x] Execution Trace UI
-- [x] Deterministic Agent Eval
-- [x] Structured constraints
-- [x] Natural-language constraint extraction
-- [x] Route-aware deterministic Validator
-- [x] Validate → Repair → Revalidate loop
-- [x] GIS / network-cost route ordering
-- [x] Persistent revision locks
-- [x] Deterministic Lock Guard
-- [x] CI
-- [ ] Typed / native tool calling
-- [ ] Hotel-anchored full-day route optimization
-- [ ] Token / LLM span tracing
-- [ ] Docker / deployment
-- [ ] Dynamic Coordinator / Router
+---
 
-## License
-
-CC BY-NC-SA 4.0
-
-## Acknowledgements
-
-- Hello-Agents
-- HelloAgents
-- 高德地图开放平台
-- amap-mcp-server
+**Project focus:** Agent Engineering · MCP Tool Calling · GIS Optimization · Deterministic Validation · Reliability · Observability · Evaluation
