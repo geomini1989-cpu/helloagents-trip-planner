@@ -1,6 +1,6 @@
 """旅行会话持久化服务。
 
-使用 SQLite 替代进程内字典，保证服务重启后仍可恢复行程、修改历史和 Agent 执行轨迹。
+使用 SQLite 保存当前计划、历史版本、Agent Trace 与 revision locks，保证服务重启后可恢复。
 """
 
 from __future__ import annotations
@@ -38,18 +38,26 @@ def _init_db() -> None:
                 current_plan TEXT NOT NULL,
                 history TEXT NOT NULL DEFAULT '[]',
                 execution_trace TEXT NOT NULL DEFAULT '[]',
+                locks TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(trip_sessions)").fetchall()}
+        if "locks" not in columns:
+            conn.execute("ALTER TABLE trip_sessions ADD COLUMN locks TEXT NOT NULL DEFAULT '{}'")
         conn.commit()
 
 
 _init_db()
 
 
-def create_session(plan_data: Dict[str, Any], execution_trace: Optional[List[Dict[str, Any]]] = None) -> str:
+def create_session(
+    plan_data: Dict[str, Any],
+    execution_trace: Optional[List[Dict[str, Any]]] = None,
+    locks: Optional[Dict[str, Any]] = None,
+) -> str:
     """创建持久化会话并返回 session_id。"""
     session_id = str(uuid.uuid4())
     now = _utc_now()
@@ -58,14 +66,15 @@ def create_session(plan_data: Dict[str, Any], execution_trace: Optional[List[Dic
         conn.execute(
             """
             INSERT INTO trip_sessions (
-                session_id, current_plan, history, execution_trace, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                session_id, current_plan, history, execution_trace, locks, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
                 json.dumps(plan_data, ensure_ascii=False),
                 "[]",
                 json.dumps(execution_trace or [], ensure_ascii=False),
+                json.dumps(locks or {}, ensure_ascii=False),
                 now,
                 now,
             ),
@@ -76,7 +85,7 @@ def create_session(plan_data: Dict[str, Any], execution_trace: Optional[List[Dic
 
 
 def get_session(session_id: str) -> Optional[Dict[str, Any]]:
-    """读取会话、历史记录与执行轨迹。"""
+    """读取会话、历史记录、锁定状态与执行轨迹。"""
     with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM trip_sessions WHERE session_id = ?",
@@ -91,6 +100,7 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
         "current_plan": json.loads(row["current_plan"]),
         "history": json.loads(row["history"]),
         "execution_trace": json.loads(row["execution_trace"]),
+        "locks": json.loads(row["locks"] or "{}"),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -102,8 +112,9 @@ def update_session_plan(
     *,
     feedback: Optional[str] = None,
     execution_trace: Optional[List[Dict[str, Any]]] = None,
+    locks: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """更新当前计划，并把旧版本写入 history。"""
+    """更新当前计划，把旧版本写入 history，并可同步 revision locks。"""
     session = get_session(session_id)
     if not session:
         return False
@@ -113,6 +124,7 @@ def update_session_plan(
         {
             "updated_at": _utc_now(),
             "feedback": feedback,
+            "locks": session.get("locks", {}),
             "plan": session["current_plan"],
         }
     )
@@ -120,24 +132,39 @@ def update_session_plan(
     merged_trace = session["execution_trace"]
     if execution_trace:
         merged_trace = [*merged_trace, *execution_trace]
+    persisted_locks = session.get("locks", {}) if locks is None else locks
 
     with _connect() as conn:
         conn.execute(
             """
             UPDATE trip_sessions
-            SET current_plan = ?, history = ?, execution_trace = ?, updated_at = ?
+            SET current_plan = ?, history = ?, execution_trace = ?, locks = ?, updated_at = ?
             WHERE session_id = ?
             """,
             (
                 json.dumps(new_plan, ensure_ascii=False),
                 json.dumps(history, ensure_ascii=False),
                 json.dumps(merged_trace, ensure_ascii=False),
+                json.dumps(persisted_locks, ensure_ascii=False),
                 _utc_now(),
                 session_id,
             ),
         )
         conn.commit()
 
+    return True
+
+
+def update_session_locks(session_id: str, locks: Dict[str, Any]) -> bool:
+    """只更新会话锁定状态，不生成新的行程历史版本。"""
+    if not get_session(session_id):
+        return False
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE trip_sessions SET locks = ?, updated_at = ? WHERE session_id = ?",
+            (json.dumps(locks, ensure_ascii=False), _utc_now(), session_id),
+        )
+        conn.commit()
     return True
 
 
