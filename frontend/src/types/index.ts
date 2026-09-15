@@ -87,6 +87,13 @@ export interface TripFormData {
   free_text_input: string
 }
 
+export interface RetryError {
+  attempt: number
+  category: string
+  message: string
+  retryable: boolean
+}
+
 export interface ExecutionTraceEvent {
   id: string
   agent: string
@@ -96,8 +103,13 @@ export interface ExecutionTraceEvent {
   started_at: string
   finished_at?: string
   duration_ms: number
+  attempts?: number
   error?: string | null
+  error_category?: string | null
+  retry_errors?: RetryError[]
   result_preview?: string
+  degraded?: boolean
+  retried_steps?: number
 }
 
 export interface TripPlanResponse {
