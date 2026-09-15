@@ -9,7 +9,7 @@ from hello_agents import SimpleAgent
 from hello_agents.tools import MCPTool
 
 from ..config import get_settings
-from ..models.schemas import DayPlan, TripPlan, TripRequest
+from ..models.schemas import DayPlan, RevisionLocks, TripPlan, TripRequest
 from ..services.llm_service import get_llm
 from ..services.resilience_service import run_with_retry
 
@@ -105,7 +105,7 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。根据真实景点、天气
 4. 必须给出预算，并确保 budget.total 等于四个分项之和。
 5. day_index 从 0 连续递增。
 6. 硬约束优先级高于“尽量多安排景点”，必须遵守预算、每日景点数、游览总时长和交通时长限制。
-7. 尽量把同一区域的景点安排在同一天，减少跨区折返。
+7. 尽量把同一区域的景点安排在同一天，减少跨区折返；最终顺序还会由 GIS 路线优化层处理。
 """
 
 REVISE_AGENT_PROMPT = """你是行程规划修正专家。根据用户修改意见对当前 JSON 行程做局部调整。
@@ -114,6 +114,10 @@ REVISE_AGENT_PROMPT = """你是行程规划修正专家。根据用户修改意�
 1. 只修改用户提到的部分，其他内容尽量保持原样。
 2. 输出完整合法 JSON，不要解释。
 3. 不要创造不存在的 POI。
+4. revision_locks 中列出的日期、酒店或景点属于硬锁定内容，绝对不能修改、删除或移动。
+
+Revision locks：
+{locks_json}
 
 当前行程：
 {current_plan_json}
@@ -187,11 +191,19 @@ class MultiAgentTripPlanner:
             print(f"❌ 生成旅行计划失败: {exc}")
             return self._create_fallback_plan(request)
 
-    def revise_trip(self, current_plan: Dict[str, Any], user_feedback: str) -> Dict[str, Any]:
+    def revise_trip(
+        self,
+        current_plan: Dict[str, Any],
+        user_feedback: str,
+        locks: RevisionLocks | None = None,
+    ) -> Dict[str, Any]:
         settings = get_settings()
+        effective_locks = locks or RevisionLocks()
+        locks_payload = effective_locks.model_dump() if hasattr(effective_locks, "model_dump") else effective_locks.dict()
         prompt = REVISE_AGENT_PROMPT.format(
             current_plan_json=json.dumps(current_plan, ensure_ascii=False, indent=2),
             user_feedback=user_feedback,
+            locks_json=json.dumps(locks_payload, ensure_ascii=False, indent=2),
         )
 
         def _revise_once() -> TripPlan:
