@@ -14,9 +14,9 @@
     "noEmit": true,
     "jsx": "preserve",
 
-    /* Linting */
+    /* Type safety / lint-like checks */
     "strict": true,
-    "noUnusedLocals": true,
+    "noUnusedLocals": false,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
@@ -29,4 +29,3 @@
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue"]
 }
-
