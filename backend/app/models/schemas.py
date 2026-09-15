@@ -15,6 +15,14 @@ class TripConstraints(BaseModel):
     max_route_minutes: int = Field(default=60, ge=10, le=240, description="相邻景点单段交通时间上限(分钟)")
 
 
+class RevisionLocks(BaseModel):
+    """自然语言修改时不可被 Agent 改动的内容。"""
+
+    locked_day_indexes: List[int] = Field(default_factory=list, description="锁定的 day_index 列表(从0开始)")
+    lock_all_hotels: bool = Field(default=False, description="是否锁定所有日期的酒店/住宿")
+    locked_attraction_names: List[str] = Field(default_factory=list, description="必须保持原日期和内容的景点名称")
+
+
 class TripRequest(BaseModel):
     """旅行规划请求"""
     city: str = Field(..., description="目的地城市", examples=["北京"])
