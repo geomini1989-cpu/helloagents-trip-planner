@@ -4,7 +4,7 @@
       <div>
         <div class="eyebrow">AGENT OBSERVABILITY</div>
         <h1>Agent Execution Trace</h1>
-        <p>查看一次旅行规划请求中各 Agent 的任务、工具调用、状态、重试与耗时。</p>
+        <p>查看检索、规划、约束校验、自动修正、重试与耗时。</p>
       </div>
       <a-space>
         <a-button @click="loadTrace" :loading="loading">刷新</a-button>
@@ -39,8 +39,8 @@
           <div class="metric-value">{{ retriedCount }}</div>
         </a-card>
         <a-card :bordered="false">
-          <div class="metric-label">Failed / Fallback</div>
-          <div class="metric-value">{{ failedCount }}</div>
+          <div class="metric-label">Problem Events</div>
+          <div class="metric-value">{{ problemCount }}</div>
         </a-card>
       </div>
 
@@ -49,8 +49,8 @@
         type="warning"
         show-icon
         class="degraded-alert"
-        message="本次任务已完成，但存在降级步骤"
-        description="至少一个 Agent 调用失败或 Planner 使用了 fallback。可在下方查看错误类别与重试记录。"
+        message="本次任务存在降级或未完全解决的约束冲突"
+        description="可能是 Agent / Tool 失败、Planner fallback，或自动修正后仍未通过 Validator。请查看下方 validation report。"
       />
 
       <a-card class="pipeline-card" :bordered="false" title="任务编排链路">
@@ -92,6 +92,26 @@
               <span>Attempts: {{ plannerStep.attempts || 1 }}</span>
             </div>
           </div>
+
+          <template v-for="item in validationFlowSteps" :key="item.id">
+            <div class="flow-arrow">↓</div>
+            <div
+              class="agent-node validation-node"
+              :class="[`status-${item.status}`, { 'repair-node': item.agent === 'Repair Agent' }]"
+            >
+              <div class="node-top">
+                <strong>{{ item.agent }}</strong>
+                <a-tag :color="statusColor(item.status)">{{ item.status }}</a-tag>
+              </div>
+              <div class="node-task">{{ item.task }}</div>
+              <div class="node-meta">
+                <span v-if="item.validation_report">
+                  Blocking issues: {{ item.validation_report.blocking_issue_count }}
+                </span>
+                <span>{{ item.duration_ms }} ms</span>
+              </div>
+            </div>
+          </template>
         </div>
       </a-card>
 
@@ -110,6 +130,28 @@
             <div v-if="item.tool" class="timeline-tool">Tool · {{ item.tool }}</div>
             <div v-if="item.error_category" class="error-category">Error · {{ item.error_category }}</div>
             <div v-if="item.error" class="timeline-error">{{ item.error }}</div>
+
+            <div v-if="item.validation_report" class="validation-panel">
+              <div class="validation-title">
+                Validation · {{ item.validation_report.passed ? 'passed' : 'needs revision' }}
+              </div>
+              <div class="validation-meta">
+                <span>Route segments: {{ item.validation_report.checked_route_segments }}</span>
+                <span>
+                  Sources:
+                  {{ Object.entries(item.validation_report.route_source_counts).map(([k, v]) => `${k}=${v}`).join(', ') || '-' }}
+                </span>
+              </div>
+              <div
+                v-for="issue in item.validation_report.issues"
+                :key="`${item.id}-${issue.code}-${issue.day_index ?? 'all'}`"
+                class="validation-issue"
+                :class="`issue-${issue.severity}`"
+              >
+                <strong>{{ issue.code }}</strong>
+                <span>{{ issue.message }}</span>
+              </div>
+            </div>
 
             <div v-if="item.retry_errors?.length" class="retry-panel">
               <div class="retry-title">Retry history</div>
@@ -142,8 +184,9 @@ const loading = ref(false)
 const shortSessionId = computed(() => sessionId.value ? `${sessionId.value.slice(0, 8)}…${sessionId.value.slice(-4)}` : '-')
 const retrievalSteps = computed(() => trace.value.filter(item => ['Attraction Agent', 'Weather Agent', 'Hotel Agent'].includes(item.agent)))
 const plannerStep = computed(() => trace.value.find(item => item.agent === 'Planner Agent'))
+const validationFlowSteps = computed(() => trace.value.filter(item => ['Trip Validator', 'Repair Agent', 'Post-Repair Validator'].includes(item.agent)))
 const orchestratorStep = computed(() => trace.value.find(item => item.agent === 'Orchestrator'))
-const failedCount = computed(() => trace.value.filter(item => ['failed', 'fallback'].includes(item.status)).length)
+const problemCount = computed(() => trace.value.filter(item => ['failed', 'fallback', 'needs_revision', 'degraded'].includes(item.status)).length)
 const retriedCount = computed(() => trace.value.filter(item => item.agent !== 'Orchestrator' && Number(item.attempts || 1) > 1).length)
 const totalDuration = computed(() => {
   if (orchestratorStep.value) return orchestratorStep.value.duration_ms
@@ -153,13 +196,13 @@ const totalDuration = computed(() => {
 const statusColor = (status: string) => {
   if (status === 'success') return 'green'
   if (status === 'running') return 'blue'
-  if (status === 'fallback') return 'orange'
+  if (['fallback', 'needs_revision', 'degraded'].includes(status)) return 'orange'
   return 'red'
 }
 
 const timelineColor = (status: string) => {
   if (status === 'success') return 'green'
-  if (status === 'fallback') return 'orange'
+  if (['fallback', 'needs_revision', 'degraded'].includes(status)) return 'orange'
   if (status === 'failed') return 'red'
   return 'blue'
 }
@@ -272,7 +315,9 @@ onMounted(loadTrace)
 
 .status-success { border-left: 4px solid #22c55e; }
 .status-failed { border-left: 4px solid #ef4444; }
-.status-fallback { border-left: 4px solid #f59e0b; }
+.status-fallback,
+.status-needs_revision,
+.status-degraded { border-left: 4px solid #f59e0b; }
 .status-running { border-left: 4px solid #3b82f6; }
 
 .node-top,
@@ -304,10 +349,14 @@ onMounted(loadTrace)
   font-weight: 600;
 }
 
-.planner-node {
-  width: min(520px, 100%);
-  background: #eef2ff;
+.planner-node,
+.validation-node {
+  width: min(620px, 100%);
 }
+
+.planner-node { background: #eef2ff; }
+.validation-node { background: #f0fdf4; }
+.repair-node { background: #fff7ed; }
 
 .timeline-title span {
   color: #94a3b8;
@@ -338,6 +387,48 @@ onMounted(loadTrace)
 .timeline-error {
   margin-top: 8px;
   color: #dc2626;
+}
+
+.validation-panel {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.validation-title {
+  font-weight: 700;
+  color: #334155;
+}
+
+.validation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.validation-issue {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.issue-error {
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.issue-warning {
+  background: #fffbeb;
+  color: #92400e;
 }
 
 .retry-panel {
@@ -392,7 +483,8 @@ onMounted(loadTrace)
     flex-direction: column;
   }
 
-  .retry-row {
+  .retry-row,
+  .validation-issue {
     grid-template-columns: 1fr;
   }
 }
