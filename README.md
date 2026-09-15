@@ -2,82 +2,195 @@
 
 一个面向真实旅行规划场景的 **Multi-Agent AI Application**。
 
-项目基于 HelloAgents 构建多个专职 Agent，通过 **MCP（Model Context Protocol）** 接入高德地图能力，并使用 FastAPI + Vue 3 完成任务编排、工具调用、结构化输出、会话持久化、自然语言修订、执行追踪与 Agent Eval。
+项目基于 HelloAgents 构建专职 Agent，通过 **MCP（Model Context Protocol）** 接入高德地图能力，并使用 FastAPI + Vue 3 完成任务编排、真实工具调用、结构化输出、会话持久化、可靠性处理、执行追踪和 Agent Eval。
 
-> 项目的重点不是“让大模型生成一段旅行文案”，而是验证如何把 **Agent Orchestration、Tool Calling、Structured Output、Reliability、State、Observability 与 Evaluation** 组合成一个可运行、可调试、可评估的 Agent System。
+> 重点不是“让大模型生成一段旅行文案”，而是让 Agent 在 **真实工具、硬约束、确定性校验和反馈修正闭环** 下完成旅行规划任务。
 
 ## Highlights
 
 - **Multi-Agent Decomposition**：Attraction / Weather / Hotel / Planner 职责拆分
-- **Parallel Orchestration**：三个检索型 Agent 使用 fan-out / fan-in 并行执行
-- **MCP Tool Calling**：通过高德地图 MCP 获取真实外部信息
-- **Structured Output**：Planner 输出受 Pydantic 约束的 `TripPlan`
-- **Request-scoped Agents**：每次请求创建独立 Agent 上下文，避免历史消息跨请求污染
+- **Parallel Orchestration**：检索 Agent 使用 fan-out / fan-in 并行执行
+- **MCP Tool Calling**：通过高德地图 MCP 获取 POI、天气和路线数据
+- **Structured Constraints**：预算、每日景点数、游览时长、单段交通时长转为硬约束
+- **Natural-language Constraint Extraction**：支持“预算 2000 元以内”“每天最多 2 个景点”等自然语言要求
+- **Deterministic Trip Validator**：检查预算、每日强度、重复景点、路线耗时等可明确判断的问题
+- **Validate → Repair → Revalidate**：初稿不合格时触发一次最小自动修正，并再次校验
+- **Route-aware Validation**：优先使用高德 MCP 路线耗时，失败时退化为坐标距离估算并显式标记来源
 - **Reliability Policy**：异常分类、有限重试、退避与显式 fallback
-- **Persistent Session**：SQLite 保存当前计划、历史版本和执行轨迹
-- **Natural-language Revision**：基于 `session_id` 对现有计划做局部自然语言修改
-- **Agent Observability**：独立 Trace 页面展示 Tool / Status / Latency / Retry / Error
-- **Deterministic Eval**：固定测试集衡量结构化输出、Agent 成功率、fallback 与延迟
-- **Offline CI**：GitHub Actions 自动执行 Python 编译、可靠性单测与前端 TypeScript Build
+- **Request-scoped Agents**：避免 SimpleAgent history 跨请求污染
+- **Persistent Session**：SQLite 保存计划、历史版本和 Execution Trace
+- **Observability**：Trace 页面展示 Agent / Tool / Retry / Validator / Repair / Latency
+- **Deterministic Eval**：衡量生成成功率、工具成功率、验证通过率、修正成功率和延迟
+- **CI**：自动执行 Python compile、单元测试和 Vue/TypeScript build
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    U[User] --> FE[Vue 3 + TypeScript]
-    FE --> API[FastAPI]
-    API --> O[Orchestration Service]
+    U[User] --> API[FastAPI]
+    API --> C[Constraint Normalizer]
+    C --> O[Orchestrator]
 
     O -->|parallel| A[Attraction Agent]
     O -->|parallel| W[Weather Agent]
     O -->|parallel| H[Hotel Agent]
 
-    A --> MCP[AMap MCP Server]
+    A --> MCP[AMap MCP]
     W --> MCP
     H --> MCP
 
     A --> P[Planner Agent]
     W --> P
     H --> P
+    C --> P
 
-    P --> TP[Structured TripPlan]
-    TP --> DB[(SQLite Session Store)]
-    O --> T[Execution Trace]
-    T --> DB
+    P --> T[Typed TripPlan]
+    T --> V[Deterministic Validator]
+    V --> RTE[AMap Route Metrics]
 
-    DB --> API
-    API --> FE
+    V -->|passed| DB[(SQLite Session Store)]
+    V -->|blocking issues| R[Repair Agent]
+    R --> V2[Post-Repair Validator]
+    V2 --> DB
 
-    E[Eval Runner] --> O
-    O --> ER[Eval Metrics]
+    O --> TRACE[Execution Trace]
+    TRACE --> DB
+    DB --> FE[Vue Result / Trace UI]
 ```
 
-## Agent Workflow
+## Planning Workflow
 
 ```text
 User Request
     ↓
-FastAPI
+Constraint Normalizer
     ↓
 Orchestrator
-    ├── Attraction Agent ── MCP ─┐
-    ├── Weather Agent ───── MCP ─┼── parallel
-    └── Hotel Agent ─────── MCP ─┘
+    ├── Attraction Agent ── AMap MCP ─┐
+    ├── Weather Agent ───── AMap MCP ─┼── parallel
+    └── Hotel Agent ─────── AMap MCP ─┘
                     ↓ fan-in
                Planner Agent
                     ↓
-             Structured TripPlan
+               Typed TripPlan
                     ↓
-       SQLite Session + Execution Trace
-                    ↓
-             Vue Result / Trace UI
+              Trip Validator
+        ┌───────────┴───────────┐
+      passed                blocking issues
+        ↓                         ↓
+   Final Plan                Repair Agent
+                                  ↓
+                         Post-Repair Validator
+                                  ↓
+                              Final Plan
 ```
 
-Attraction、Weather、Hotel 三个任务互不依赖，因此并行执行；Planner 等待三者结果汇合后生成最终 `TripPlan`。
+自动 Repair 最多执行一次，避免 Agent 在“生成 → 校验 → 重写”之间无限循环。
+
+## Structured Constraints
+
+API 可以直接传递结构化约束：
+
+```json
+{
+  "city": "北京",
+  "start_date": "2026-10-01",
+  "end_date": "2026-10-03",
+  "travel_days": 3,
+  "transportation": "公共交通",
+  "accommodation": "舒适型酒店",
+  "preferences": ["历史文化", "美食"],
+  "constraints": {
+    "max_budget": 2500,
+    "max_daily_attractions": 3,
+    "max_daily_visit_minutes": 480,
+    "max_route_minutes": 60
+  }
+}
+```
+
+普通用户不需要理解这个结构，也可以直接写：
+
+```text
+总预算控制在 2500 元以内，每天最多 3 个景点，单段交通不要超过 45 分钟。
+```
+
+后端只提取能明确量化的要求，不会把模糊偏好强行转换成硬约束。
+
+## Deterministic Validator
+
+Validator 当前检查：
+
+- 行程天数与请求是否一致
+- 总预算是否超过上限
+- 每天景点数量是否过多
+- 每日景点游览总时长是否过高
+- 是否重复安排同一景点
+- 相邻景点的交通耗时是否超过限制
+- 路线数据来自真实 AMap MCP 还是坐标估算 fallback
+
+例如：
+
+```json
+{
+  "code": "route_leg_too_long",
+  "severity": "error",
+  "message": "第 2 天“景点A → 景点B”预计交通约 86 分钟，超过单段上限 60 分钟。",
+  "details": {
+    "route_minutes": 86,
+    "source": "amap_mcp"
+  }
+}
+```
+
+与单纯让 LLM “自己检查一下”不同，这些规则可以重复执行、自动测试，也可以进入 Eval。
+
+## Route-aware Validation
+
+相邻景点路线优先使用高德 MCP：
+
+```text
+maps_direction_walking_by_address
+maps_direction_driving_by_address
+maps_direction_transit_integrated_by_address
+```
+
+如果 MCP 路线不可用，Validator 不会假装拿到了真实路线，而会：
+
+1. 根据景点经纬度计算直线距离；
+2. 按交通方式做保守时间估算；
+3. 在 Trace 中把数据源记录为 `coordinate_estimate`。
+
+真实路线成功时则记录：
+
+```text
+source = amap_mcp
+```
+
+## Validate → Repair → Revalidate
+
+Planner 初稿出现硬冲突时，Repair Agent 会获得：
+
+```text
+当前 TripPlan
++ Structured Constraints
++ Validator Blocking Issues
+```
+
+Repair Prompt 明确要求 **最小范围修改**，而不是重新自由规划整个行程。
+
+修正后再次执行 Validator。如果仍然不通过，Orchestrator 会标记：
+
+```text
+status = degraded
+validation_passed = false
+```
+
+系统不会把未解决的冲突伪装成完全成功。
 
 ## Reliability
 
-项目把常见异常统一归类为：
+统一异常类别：
 
 ```text
 timeout
@@ -88,71 +201,90 @@ validation
 agent_error
 ```
 
-默认配置：
+默认：
 
 ```env
-LLM_TIMEOUT=120
 AGENT_MAX_RETRIES=2
 AGENT_RETRY_BACKOFF_SECONDS=0.5
 ```
 
-策略不是“所有错误都重试”：
+- timeout / network / rate limit：允许有限重试
+- auth：不重试
+- Planner JSON / Pydantic validation：允许重新生成
+- 所有尝试耗尽后才进入 fallback
 
-- 网络、限流、超时等瞬时错误允许重试
-- 认证错误不重试
-- 普通检索步骤的 validation 错误不盲目重试
-- Planner 如果只是生成了非法 JSON / 不符合 `TripPlan`，允许重新生成
-- 所有 Planner 尝试失败后才进入 fallback
-- fallback 不伪造景点、经纬度、天气或预算，而是返回明确的降级状态
+Fallback 不会伪造景点、天气或坐标，而是返回明确的降级结果。
 
-模型请求的实际超时由 LLM Provider / `LLM_TIMEOUT` 负责，避免使用无法安全终止的线程伪造“强制超时”。
+## Execution Trace
 
-## Request Isolation
-
-HelloAgents 的 Agent 实例会维护当前对话上下文，因此业务层不复用同一个 `SimpleAgent` 承载不同请求。
-
-当前实现复用的是系统配置、LLM 配置和 MCP 能力；每次旅行规划都会重新创建：
+前端 `/trace` 页面可以看到：
 
 ```text
-Attraction Agent
-Weather Agent
-Hotel Agent
+Attraction Agent ┐
+Weather Agent    ├── parallel
+Hotel Agent      ┘
+       ↓
 Planner Agent
+       ↓
+Trip Validator
+       ↓ (if needed)
+Repair Agent
+       ↓
+Post-Repair Validator
+       ↓
+Orchestrator
 ```
 
-这样不同用户请求、不同 Eval case 之间不会因为历史消息发生上下文串扰。
+每个事件可包含：
 
-## Agent Execution Trace
-
-每个步骤都会记录类似事件：
-
-```json
-{
-  "agent": "Weather Agent",
-  "task": "查询目的地天气",
-  "tool": "amap_maps_weather",
-  "status": "success",
-  "duration_ms": 1264.42,
-  "attempts": 2,
-  "error_category": null,
-  "retry_errors": []
-}
+```text
+status
+latency
+attempts
+retry history
+error category
+tool name
+validation issues
+route source
+degraded state
 ```
 
-前端 `/trace` 页面展示：
+## Agent Eval
 
-- 三个并行检索 Agent
-- Planner 汇总节点
-- MCP Tool 名称
-- 单步和整体 latency
-- 尝试次数与 retry history
-- error category
-- failed / fallback / degraded 状态
-- 简短结果预览
+运行：
 
-## Persistent Session & Revision
+```bash
+cd backend
+python -m evals.run_eval
+```
 
-首次生成计划后会创建 `session_id`，SQLite 保存：
+只跑前三条：
+
+```bash
+python -m evals.run_eval --limit 3
+```
+
+当前聚合指标包括：
+
+```text
+case_pass_rate
+average_check_score
+structured_output_success_rate
+retrieval_agent_success_rate
+validation_pass_rate
+repair_trigger_rate
+repair_success_rate
+fallback_rate
+agent_step_retry_rate
+average_latency_ms
+p95_latency_ms
+```
+
+README 不预填任何虚构成绩；只有真实环境完成 Eval 后才应该把指标写进简历。
+
+## Persistent Session
+
+SQLite 保存：
 
 ```text
 session_id
@@ -166,92 +298,10 @@ updated_at
 用户可以继续输入：
 
 ```text
-把第二天上午的博物馆换成适合拍照的公园，其他安排不变。
+把第二天上午的博物馆换成一个适合拍照的公园，其他安排不变。
 ```
 
-Revision Agent 基于当前计划做局部修改；旧版本进入 `history`，相关 Trace 会继续追加。
-
-## Deterministic Agent Eval
-
-当前优先做 **可重复、可解释的工程 Eval**，而不是先引入 LLM-as-a-Judge。
-
-默认测试集包含北京、上海、广州、成都、西安、杭州、南京、深圳等场景，并检查：
-
-- 目的地和天数是否匹配请求
-- `day_index` 是否连续
-- 每天最少景点数量
-- 早餐 / 午餐 / 晚餐是否完整
-- 经纬度是否在合法范围
-- 天气是否覆盖旅行日期
-- 预算是否存在且汇总一致
-- Attraction / Weather / Hotel Agent 是否成功
-- Planner 是否成功输出结构化 `TripPlan`
-- 是否发生 fallback
-
-聚合指标包括：
-
-```text
-case_pass_rate
-average_check_score
-structured_output_success_rate
-retrieval_agent_success_rate
-fallback_rate
-agent_step_retry_rate
-average_latency_ms
-p95_latency_ms
-error_categories
-```
-
-### Run Eval
-
-在 `backend/` 目录：
-
-```bash
-python -m evals.run_eval
-```
-
-快速跑前三条：
-
-```bash
-python -m evals.run_eval --limit 3
-```
-
-指定场景：
-
-```bash
-python -m evals.run_eval --case beijing-culture-3d
-```
-
-设置质量门槛：
-
-```bash
-python -m evals.run_eval --min-pass-rate 0.8
-```
-
-结果默认写入：
-
-```text
-backend/evals/reports/latest.json
-```
-
-报告目录已加入 `.gitignore`。README 不预填虚构的成功率或延迟数据，只有真实环境跑完 Eval 后才应把实际指标写进简历。
-
-## CI
-
-`.github/workflows/ci.yml` 在 `main` push 和 Pull Request 时运行两组离线检查：
-
-```text
-Backend
-  ├── install dependencies
-  ├── python -m compileall app evals
-  └── pytest tests -q
-
-Frontend
-  ├── npm ci
-  └── npm run build
-```
-
-CI 不调用真实 LLM 或高德 MCP，因此不会消耗模型 API；真实 Agent Eval 仍应在配置受保护密钥的环境中执行。
+旧版本进入 `history`，Revision Trace 追加到 Session。
 
 ## Tech Stack
 
@@ -264,9 +314,8 @@ CI 不调用真实 LLM 或高德 MCP，因此不会消耗模型 API；真实 Age
 - FastAPI
 - Pydantic
 - SQLite
-- `ThreadPoolExecutor`
+- ThreadPoolExecutor
 - pytest
-- GitHub Actions
 
 ### Frontend
 
@@ -275,17 +324,12 @@ CI 不调用真实 LLM 或高德 MCP，因此不会消耗模型 API；真实 Age
 - Vue Router
 - Vite
 - Ant Design Vue
-- Axios
 - AMap JavaScript API
-- html2canvas / jsPDF
 
 ## Project Structure
 
 ```text
 multi-agent-trip-planner/
-├── .github/
-│   └── workflows/
-│       └── ci.yml
 ├── backend/
 │   ├── app/
 │   │   ├── agents/
@@ -296,28 +340,26 @@ multi-agent-trip-planner/
 │   │   │   └── schemas.py
 │   │   └── services/
 │   │       ├── orchestration_service.py
+│   │       ├── constraint_service.py
+│   │       ├── validation_service.py
+│   │       ├── route_service.py
 │   │       ├── resilience_service.py
 │   │       └── session_service.py
 │   ├── evals/
 │   │   ├── cases.json
 │   │   └── run_eval.py
-│   ├── tests/
-│   │   └── test_resilience_service.py
-│   ├── requirements.txt
-│   └── requirements-dev.txt
+│   └── tests/
 ├── frontend/
-│   └── src/
-│       ├── views/
-│       │   ├── Home.vue
-│       │   ├── Result.vue
-│       │   └── Trace.vue
-│       └── types/
-└── README.md
+│   └── src/views/
+│       ├── Home.vue
+│       ├── Result.vue
+│       └── Trace.vue
+└── .github/workflows/ci.yml
 ```
 
 ## Quick Start
 
-### Backend
+Backend：
 
 ```bash
 cd backend
@@ -328,9 +370,7 @@ cp .env.example .env
 uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-FastAPI Docs：`http://localhost:8000/docs`
-
-### Frontend
+Frontend：
 
 ```bash
 cd frontend
@@ -339,66 +379,39 @@ cp .env.example .env
 npm run dev
 ```
 
-默认访问：`http://localhost:5173`
-
-生成一次旅行计划后可以访问 `/trace` 查看当前 Session 的执行轨迹。
-
-## Core APIs
-
-```http
-POST /api/trip/plan
-POST /api/trip/revise
-GET  /api/trip/session/{session_id}
-GET  /api/trip/trace/{session_id}
-```
-
 ## Engineering Decisions
 
-### Why separate Orchestrator from Agent implementation?
+### Why deterministic validation instead of another Reviewer LLM?
 
-Agent 层负责专业能力与 Prompt；Orchestrator 负责：
+预算、数量、耗时、重复景点、路线时长等问题都有可明确判断的规则。
+
+对于这些问题，确定性 Validator 比另一个 LLM 更：
+
+- 可重复
+- 可解释
+- 可测试
+- 可进入 CI / Eval
+- 不增加额外 Judge 模型的不确定性
+
+LLM 负责生成与修正，代码负责判断明确约束是否满足。
+
+### Why only one automatic repair?
+
+无限 Planner ↔ Reviewer 循环会增加成本、延迟和不可预测性。
+
+当前策略是：
 
 ```text
-依赖关系
-并行调度
-fan-out / fan-in
-错误隔离
-retry policy
-latency
-trace
+Generate → Validate → one Repair → Revalidate
 ```
 
-这样后续增加 Coordinator、DAG 或异步任务队列时，不需要继续把调度逻辑堆进 Agent 类。
-
-### Why request-scoped Agents?
-
-会话记忆属于一次业务请求，而不应该属于整个 FastAPI 进程。复用有状态 Agent 单例容易造成不同请求之间的上下文污染，因此 Agent 在请求作用域内创建。
-
-### Why deterministic Eval before LLM-as-a-Judge?
-
-结构正确性、工具成功率、fallback、约束满足和延迟都有明确判定方式。先把这些基础指标建立起来，更适合作为回归测试；主观的旅行质量以后再增加 rubric / semantic judge。
-
-### Why SQLite first?
-
-当前定位是单机作品集应用。SQLite 以很低复杂度解决进程重启后 Session 丢失的问题；未来部署为多实例时再替换 PostgreSQL / Redis。
+如果仍不通过，就显式 degraded，而不是继续无限调用模型。
 
 ### Why not A2UI now?
 
-当前 TripPlan 的主要 UI 结构是稳定的：行程、天气、酒店、预算、地图、每日安排。
+当前 UI 的核心结构稳定：行程、天气、酒店、预算、地图、Trace。
 
-变化主要是：
-
-```text
-业务数据动态
-```
-
-而不是：
-
-```text
-UI 结构动态
-```
-
-因此当前采用：
+这里主要是 **业务数据动态**，不是 **UI 结构动态**，因此当前选择：
 
 ```text
 Typed TripPlan
@@ -406,41 +419,39 @@ Typed TripPlan
 Deterministic Vue Components
 ```
 
-而不是为了增加技术关键词引入动态 UI 协议。
-
-如果未来项目演进成通用 Travel Agent Workspace，同一个 Agent 会根据任务动态生成比较表、审批表单、选择器、预算编辑器等不同 Surface，再考虑 A2UI 更合理。
+当项目未来演进成通用 Travel Agent Workspace，需要根据任务动态产生 Comparison Table、Approval Form、Budget Editor 等不同 Surface 时，再引入 A2UI 更合理。
 
 ## Current Boundaries
 
-- Agent 路由仍是固定任务图，还不是动态 Coordinator / Router
-- Tool Calling 仍依赖当前 HelloAgents / Prompt 约定，尚未升级为更严格的 typed tool schema
-- Trace 尚未记录 token usage 与完整 LLM span
-- retry 当前主要在 Agent step 层，MCP Tool 层还没有 circuit breaker
-- Session Store 使用 SQLite，暂未面向多实例部署
-- Eval 主要是确定性规则，还没有人工 rubric / semantic judge
-- CI 已覆盖离线编译、单测和前端 build，但真实 Agent Eval 尚未接入受保护密钥环境
-- 尚未完成 Docker 化和生产级日志体系
+- Tool Calling 仍依赖当前 HelloAgents 的调用约定，后续可升级 typed/native tool calling
+- Route MCP 输出存在版本差异，因此 route parser 保留 coordinate fallback
+- Agent 路由仍是固定 DAG，不是动态 Coordinator
+- Session Store 使用 SQLite，尚未面向多实例部署
+- Eval 以确定性规则为主，尚未加入主观旅行体验 rubric
+- Trace 尚未记录完整 token usage / LLM span
+- Revision 流程后续还可以加入“锁定日期/酒店/景点”机制
 
 ## Roadmap
 
-- [x] Multi-Agent task decomposition
-- [x] MCP Tool Calling
-- [x] Structured TripPlan
-- [x] Natural-language revision
+- [x] Multi-Agent decomposition
+- [x] MCP tool calling
 - [x] Parallel fan-out / fan-in orchestration
-- [x] SQLite session persistence
-- [x] Agent Execution Trace
+- [x] Structured TripPlan
+- [x] Request-scoped Agent isolation
 - [x] Retry / backoff / error classification
-- [x] Deterministic Agent Eval dataset + runner
-- [x] Reliability unit tests
-- [x] Offline GitHub Actions CI
-- [ ] Native / typed tool calling
-- [ ] Coordinator / Router dynamic task selection
-- [ ] Tool-level circuit breaker
-- [ ] Token usage / model span tracing
-- [ ] Live Agent Eval CI Gate with protected secrets
+- [x] SQLite session persistence
+- [x] Execution Trace UI
+- [x] Deterministic Agent Eval
+- [x] Structured constraints
+- [x] Natural-language constraint extraction
+- [x] Route-aware deterministic Validator
+- [x] Validate → Repair → Revalidate loop
+- [x] CI
+- [ ] Typed / native tool calling
+- [ ] Locked fields for revision
+- [ ] Token / LLM span tracing
 - [ ] Docker / deployment
-- [ ] Semantic rubric / human evaluation
+- [ ] Dynamic Coordinator / Router
 
 ## License
 
@@ -448,6 +459,7 @@ CC BY-NC-SA 4.0
 
 ## Acknowledgements
 
-- Hello-Agents / HelloAgents
+- Hello-Agents
+- HelloAgents
 - 高德地图开放平台
 - amap-mcp-server
