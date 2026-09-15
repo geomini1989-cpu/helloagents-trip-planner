@@ -92,7 +92,7 @@ export interface TripFormData {
   accommodation: string
   preferences: string[]
   free_text_input: string
-  constraints: TripConstraints
+  constraints?: TripConstraints
 }
 
 export interface RetryError {
