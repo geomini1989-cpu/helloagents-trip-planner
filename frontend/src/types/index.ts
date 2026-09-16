@@ -160,11 +160,17 @@ export interface ExecutionPlanNode {
 }
 
 export interface ExecutionPlan {
-  intent: 'full_plan' | 'general_revision' | 'weather_replan' | 'hotel_change' | 'route_optimize' | string
+  intent: 'full_plan' | 'general_revision' | 'weather_replan' | 'hotel_change' | 'route_optimize' | 'poi_rules_check' | string
   source: 'llm' | 'heuristic_fallback' | string
   reason: string
   capabilities: string[]
   nodes: ExecutionPlanNode[]
+}
+
+export interface KnowledgeSource {
+  title: string
+  url: string
+  score?: number | null
 }
 
 export interface ExecutionTraceEvent {
@@ -189,6 +195,8 @@ export interface ExecutionTraceEvent {
   violations?: LockViolation[]
   retried_steps?: number
   execution_plan?: ExecutionPlan
+  knowledge_provider?: string
+  knowledge_sources?: KnowledgeSource[]
 }
 
 export interface TripPlanResponse {
