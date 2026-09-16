@@ -11,7 +11,11 @@ from hello_agents.tools import MCPTool
 from ..config import get_settings
 from ..models.schemas import DayPlan, RevisionLocks, TripPlan, TripRequest
 from ..services.llm_service import get_llm
-from ..services.local_knowledge_service import LocalKnowledgeResult, search_local_knowledge
+from ..services.local_knowledge_service import (
+    LocalKnowledgeResult,
+    normalize_agent_claims,
+    search_local_knowledge,
+)
 from ..services.resilience_service import run_with_retry
 
 
@@ -38,7 +42,7 @@ HOTEL_AGENT_PROMPT = """你是酒店推荐专家。你的任务是根据城市�
 
 LOCAL_KNOWLEDGE_AGENT_PROMPT = """你是旅行景点本地知识核验专家。
 
-你的职责不是推荐更多景点，而是基于 Web Search 提供的候选来源，核验候选景点的运营规则：
+你的职责不是推荐更多景点，而是只基于 Web Search 提供的候选来源，核验候选景点的运营规则：
 - 开放时间 / 停止入场时间
 - 是否需要预约、实名或提前购票
 - 固定闭馆日
@@ -46,12 +50,27 @@ LOCAL_KNOWLEDGE_AGENT_PROMPT = """你是旅行景点本地知识核验专家。
 - 临时关闭、节假日特殊公告
 
 规则：
-1. 优先采用景区官网、博物馆官网、政府/文旅部门、官方公众号对应网页等一手来源。
-2. 搜索结果不是官方来源时，要明确标记“非官方来源，需二次确认”。
-3. 不允许根据常识补造开放时间、门票、预约或临时公告。
-4. 不确定的信息必须写“未验证”，不要猜。
-5. 每条可执行规则后保留来源 URL，方便 Planner/用户追溯。
-6. 输出简洁的结构化文本，不要输出 TripPlan JSON。
+1. 只能引用本轮输入中实际提供的 URL，禁止生成新 URL。
+2. 有明确来源支撑的事实使用 verification_status=verified，并填写对应 source_url。
+3. 信息不足或来源表述不明确时使用 verification_status=unverified，source_url 可以为空。
+4. 不允许根据常识补造开放时间、门票、预约或临时公告。
+5. 只输出完整合法 JSON，不要解释，不要 Markdown。
+
+输出结构：
+{
+  "claims": [
+    {
+      "attraction": "故宫",
+      "claim_type": "reservation",
+      "claim": "参观需要提前预约",
+      "verification_status": "verified",
+      "source_url": "https://本轮候选来源中的真实URL"
+    }
+  ],
+  "notes": []
+}
+
+claim_type 只使用：opening_hours, reservation, closure, ticket, admission, temporary_notice, other。
 """
 
 PLANNER_AGENT_PROMPT = """你是行程规划专家。根据真实景点、天气、酒店、本地运营规则和结构化硬约束，生成可执行的旅行计划。
@@ -125,7 +144,7 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。根据真实景点、天气
 5. day_index 从 0 连续递增。
 6. 硬约束优先级高于“尽量多安排景点”，必须遵守预算、每日景点数、游览总时长和交通时长限制。
 7. 尽量把同一区域的景点安排在同一天，减少跨区折返；最终顺序还会由 GIS 路线优化层处理。
-8. 对 Local Knowledge 中已核验的闭馆/预约/入场规则要主动避让；标记为“未验证”或非官方的信息只能作为提醒，不能编造成硬事实。
+8. Local Knowledge 输入中的 verified_claims 才能作为运营事实；unverified_claims 只能作为提醒。
 """
 
 REVISE_AGENT_PROMPT = """你是行程规划修正专家。根据用户修改意见对当前 JSON 行程做局部调整。
@@ -205,7 +224,7 @@ class MultiAgentTripPlanner:
         request: TripRequest,
         attraction_context: str,
     ) -> tuple[str, LocalKnowledgeResult]:
-        """Search independent web sources and let a dedicated Agent verify operational facts."""
+        """Search independent sources, then deterministically verify Agent citations."""
         result = search_local_knowledge(
             city=request.city,
             attraction_context=attraction_context,
@@ -226,9 +245,11 @@ class MultiAgentTripPlanner:
 Web Search 候选来源：
 {source_context}
 
-请只基于这些来源核验对行程真正有影响的开放、预约、闭馆、票务和临时公告信息。
+请只基于这些来源核验对行程真正有影响的开放、预约、闭馆、票务和临时公告信息，并严格按系统指定 JSON schema 输出。
 """
-        return agent.run(prompt), result
+        response = agent.run(prompt)
+        planner_context = normalize_agent_claims(response, result)
+        return planner_context, result
 
     def plan_trip(self, request: TripRequest) -> TripPlan:
         """兼容旧调用方式；API 主流程使用 Orchestrator。"""
@@ -343,7 +364,7 @@ Local Knowledge Agent 核验结果：
 {local_knowledge or '未提供；不要猜测景点开放/预约规则。'}
 
 请优先按地理邻近性安排同一天的景点，并保证预算、每日游览强度和交通成本合理。
-已核验的开放/预约/闭馆规则需要影响具体日期安排；未验证信息只能作为提醒。
+只有 Local Knowledge 的 verified_claims 可以改变具体日期安排；unverified_claims 只能作为提醒。
 只返回完整 JSON。
 """
         if request.free_text_input:
