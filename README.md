@@ -129,9 +129,15 @@ Local Knowledge Agent
 → 开放时间 / 停止入场 / 预约 / 闭馆 / 门票 / 临时公告
 ```
 
-Web Search 只负责拿候选来源，Local Knowledge Agent 只基于来源做核验和摘要。系统明确要求：没有可靠来源时写“未验证”，不能用模型常识补造开放时间或预约规则。
+Web Search 只负责拿候选来源，Local Knowledge Agent 基于来源输出结构化 claim。后端不会直接相信 Agent 自己声明的“已核验”：只有 `source_url` 与本轮 Web Search 实际返回 URL 完全匹配时，claim 才能继续保持 `verified`。
 
-Trace 会保留 provider、来源 URL、相关性分数与 fallback 状态。未配置 `TAVILY_API_KEY` 时该能力显式降级，不会假装查询成功。
+```text
+verified   → 可作为 Planner / Revision 的运营事实
+unverified → 只能作为提醒
+unsupported→ 引用了本轮不存在的来源，保留到 Trace/Eval，但从事实上下文过滤
+```
+
+这使系统可以确定性统计 source coverage、schema validity 和 unsupported-claim rate，而不是依赖另一个 LLM 判断“有没有幻觉”。未配置 `TAVILY_API_KEY` 或 claim JSON 无效时，该能力会显式 fallback，不会假装核验成功。
 
 ### Real MCP Tool Calling
 
@@ -231,7 +237,7 @@ Local Knowledge / Agent / GIS / Validator / Lock Guard
 Dynamic Orchestrator
 ```
 
-Local Knowledge 事件会展示 provider、可追溯来源 URL 与分数。Session 时间线保留完整历史，而 Pipeline 只显示最近一次 Coordinator 任务，避免第一次完整规划与后续动态修改混在一起。
+Local Knowledge 事件会展示 provider、检索来源、结构化 claims，以及 supported / unsupported / unverified 统计。Session 时间线保留完整历史，而 Pipeline 只显示最近一次 Coordinator 任务，避免第一次完整规划与后续动态修改混在一起。
 
 并记录 latency、attempts、retry、error category、route source、GIS before/after、validation issues、lock violations 和 degraded state。
 
@@ -252,25 +258,32 @@ Coordinator / Local Knowledge 测试会验证：
 - Coordinator 输出无效时能进入 deterministic fallback
 - 预约/开放规则请求会选择 `poi_rules_check`
 - 缺失 Web Search key 时 Local Knowledge 明确降级且不请求 provider
-- Web Search 结果会标准化为可追溯来源
-- Local Knowledge 来源会真正注入 Revision，而不是只创建一个未使用的 Agent
+- `verified` claim 必须引用本轮真实检索 URL
+- Agent 编造的来源会被标记为 `unsupported` 并从 Planner 事实上下文过滤
+- Local Knowledge 会真正进入 Revision 动态链路
 - 原始 TripRequest 能随 Session 持久化
 
-真实 Agent Eval 可以继续衡量：
+项目现在有两套互补 Eval：
 
 ```text
-case_pass_rate
-structured_output_success_rate
-retrieval_agent_success_rate
-validation_pass_rate
-repair_success_rate
-fallback_rate
-agent_step_retry_rate
-average_latency_ms
-p95_latency_ms
+Coordinator Routing Eval
+→ intent_accuracy
+→ capability_exact_match_rate
+→ minimal_graph_rate
+→ unnecessary_agent_call_rate
+→ missing_capability_rate
+
+Full Agent Eval
+→ structured_output_success_rate
+→ retrieval_agent_success_rate
+→ local_knowledge_source_coverage_rate
+→ local_knowledge_unsupported_claim_rate
+→ validation_pass_rate
+→ repair_success_rate
+→ fallback / retry / latency
 ```
 
-下一阶段会增加 routing accuracy / unnecessary-agent-call reduction / local-knowledge coverage 等指标。仓库不预填虚构成绩；只有真实 LLM + AMap + Web Search 环境跑出的结果才应该用于 README 或简历。
+仓库不预填虚构成绩；只有真实环境跑出的结果才应该用于 README 或简历。
 
 ## API
 
@@ -338,6 +351,10 @@ multi-agent-trip-planner/
 │   │       ├── resilience_service.py
 │   │       └── session_service.py
 │   ├── evals/
+│   │   ├── run_eval.py
+│   │   ├── run_routing_eval.py
+│   │   ├── cases.json
+│   │   └── routing_cases.json
 │   └── tests/
 ├── frontend/
 │   └── src/views/
@@ -386,7 +403,7 @@ npm run dev
 
 ## Evaluation
 
-本地运行完整 Eval：
+运行完整行程 Eval：
 
 ```bash
 cd backend
@@ -399,21 +416,29 @@ python -m evals.run_eval
 python -m evals.run_eval --limit 3
 ```
 
-GitHub Actions 中还提供 `Live Agent Eval` 工作流。完整真实评估需要配置三个 Actions Secrets：
+单独运行 Coordinator Routing Eval：
 
-```text
-LLM_API_KEY
-AMAP_API_KEY
-TAVILY_API_KEY
+```bash
+python -m evals.run_routing_eval
 ```
 
-缺少任一密钥时会明确跳过 live case，不会把 mock/空跑当成真实指标。
+GitHub Actions 中的 `Live Agent Eval` 分成两层：
+
+```text
+只配置 LLM_API_KEY
+→ 可以运行 Coordinator Routing Eval
+
+配置 LLM_API_KEY + AMAP_API_KEY + TAVILY_API_KEY
+→ 可以运行完整真实 Agent Eval
+```
+
+缺少对应密钥时只跳过该层 live eval，不会把 mock/空跑当成真实指标。
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — Coordinator、动态 Task Graph、Agent 分工、GIS、Validator、Repair、Locks 与架构取舍
 - [Local Knowledge Agent](docs/LOCAL_KNOWLEDGE.md) — 独立 Web 数据源、来源核验、动态路由与降级策略
-- [Evaluation & Testing](docs/EVALUATION.md) — 离线测试、Live Eval、指标定义和结果使用原则
+- [Evaluation & Testing](docs/EVALUATION.md) — Routing Eval、Full Live Eval、grounding 指标和结果使用原则
 - [Roadmap](docs/ROADMAP.md) — 当前完成度与后续优先级
 
 ## Current Status
@@ -428,7 +453,7 @@ User → Parallel Retrieval → Local Knowledge → Planner → GIS → Validato
 User → Coordinator → Validated Task Graph → Selected Capabilities → Revision/GIS/Validator → Session
 ```
 
-离线 Backend / Frontend CI 可以稳定验证代码。下一阶段重点不是继续增加 Agent 数量，而是配置真实环境跑 Live Eval，并增加 Coordinator routing baseline 和 Local Knowledge coverage，测量路由准确率、不必要 Agent 调用减少量、来源核验覆盖率以及不同任务类型的真实延迟。
+Routing Eval、Local Knowledge grounding 指标和完整 Agent Eval 的基础设施已经完成。下一阶段重点不是继续增加 Agent 或评估代码，而是配置真实环境跑出 **Coordinator baseline + full-flow baseline**，再根据真实失败 case 做针对性优化。
 
 ## Design Boundary
 
@@ -438,4 +463,4 @@ User → Coordinator → Validated Task Graph → Selected Capabilities → Revi
 
 ---
 
-**Project focus:** Dynamic Multi-Agent Orchestration · Multi-Source Retrieval · MCP Tool Calling · GIS Optimization · Deterministic Validation · Reliability · Observability · Evaluation
+**Project focus:** Dynamic Multi-Agent Orchestration · Multi-Source Retrieval · Grounded Local Knowledge · MCP Tool Calling · GIS Optimization · Deterministic Validation · Reliability · Observability · Evaluation
