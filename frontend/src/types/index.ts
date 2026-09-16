@@ -173,6 +173,27 @@ export interface KnowledgeSource {
   score?: number | null
 }
 
+export interface KnowledgeClaim {
+  attraction: string
+  claim_type: string
+  claim: string
+  verification_status: 'verified' | 'unverified' | 'unsupported' | string
+  source_url?: string | null
+  source_title?: string | null
+}
+
+export interface KnowledgeClaimMetrics {
+  total_claims: number
+  supported_claims: number
+  unsupported_claims: number
+  unverified_claims: number
+  supported_claim_rate: number
+  unsupported_claim_rate: number
+  unverified_claim_rate: number
+  source_count: number
+  claim_parse_error?: string | null
+}
+
 export interface ExecutionTraceEvent {
   id: string
   agent: string
@@ -197,6 +218,8 @@ export interface ExecutionTraceEvent {
   execution_plan?: ExecutionPlan
   knowledge_provider?: string
   knowledge_sources?: KnowledgeSource[]
+  knowledge_claims?: KnowledgeClaim[]
+  knowledge_claim_metrics?: KnowledgeClaimMetrics
 }
 
 export interface TripPlanResponse {
