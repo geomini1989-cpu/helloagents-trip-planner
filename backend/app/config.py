@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # 应用基本配置
     app_name: str = "Multi-Agent Trip Planner"
-    app_version: str = "1.1.0"
+    app_version: str = "1.2.0"
     debug: bool = False
 
     # 服务器配置
@@ -32,6 +32,11 @@ class Settings(BaseSettings):
 
     # 高德地图API配置
     amap_api_key: str = ""
+
+    # Local Knowledge / Web Search 配置
+    tavily_api_key: str = ""
+    local_knowledge_max_results: int = 5
+    local_knowledge_timeout_seconds: float = 12.0
 
     # Unsplash API配置
     unsplash_access_key: str = ""
@@ -80,6 +85,9 @@ def validate_config():
     if not llm_api_key:
         warnings.append("LLM_API_KEY或OPENAI_API_KEY未配置,LLM功能可能无法使用")
 
+    if not settings.tavily_api_key:
+        warnings.append("TAVILY_API_KEY未配置,Local Knowledge Agent 将显式降级且不会猜测开放/预约规则")
+
     if errors:
         error_msg = "配置错误:\n" + "\n".join(f"  - {e}" for e in errors)
         raise ValueError(error_msg)
@@ -98,6 +106,7 @@ def print_config():
     print(f"版本: {settings.app_version}")
     print(f"服务器: {settings.host}:{settings.port}")
     print(f"高德地图API Key: {'已配置' if settings.amap_api_key else '未配置'}")
+    print(f"Tavily API Key: {'已配置' if settings.tavily_api_key else '未配置'}")
 
     llm_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
     llm_base_url = os.getenv("LLM_BASE_URL") or settings.openai_base_url
