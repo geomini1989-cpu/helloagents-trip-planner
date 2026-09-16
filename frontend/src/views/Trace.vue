@@ -4,7 +4,7 @@
       <div>
         <div class="eyebrow">AGENT OBSERVABILITY</div>
         <h1>Agent Execution Trace</h1>
-        <p>查看 Coordinator 路由、动态任务图、Agent / Tool、GIS、Validator、Lock Guard、重试与耗时。</p>
+        <p>查看 Coordinator 路由、动态任务图、Local Knowledge 来源、Agent / Tool、GIS、Validator、Lock Guard、重试与耗时。</p>
       </div>
       <a-space>
         <a-button @click="loadTrace" :loading="loading">刷新</a-button>
@@ -50,7 +50,7 @@
         show-icon
         class="degraded-alert"
         message="最近一次任务存在降级或未完全解决的约束冲突"
-        description="可能是 Agent / Tool / GIS 失败、Coordinator fallback，或修改后仍未通过 Validator。请查看下方执行明细。"
+        description="可能是 Agent / Tool / Local Knowledge / GIS 失败、Coordinator fallback，或修改后仍未通过 Validator。请查看下方执行明细。"
       />
 
       <a-alert
@@ -125,8 +125,28 @@
             </div>
           </div>
 
-          <div v-if="retrievalSteps.length && plannerStep" class="flow-arrow">↓ fan-in</div>
-          <div v-else-if="retrievalSteps.length && downstreamSteps.length" class="flow-arrow">↓</div>
+          <div v-if="retrievalSteps.length && knowledgeStep" class="flow-arrow">↓ attraction-dependent enrichment</div>
+
+          <div
+            v-if="knowledgeStep"
+            class="agent-node knowledge-node"
+            :class="`status-${knowledgeStep.status}`"
+          >
+            <div class="node-top">
+              <strong>{{ knowledgeStep.agent }}</strong>
+              <a-tag :color="statusColor(knowledgeStep.status)">{{ knowledgeStep.status }}</a-tag>
+            </div>
+            <div class="node-task">{{ knowledgeStep.task }}</div>
+            <div class="node-meta">
+              <span v-if="knowledgeStep.tool">Tool: {{ knowledgeStep.tool }}</span>
+              <span v-if="knowledgeStep.knowledge_provider">Provider: {{ knowledgeStep.knowledge_provider }}</span>
+              <span v-if="knowledgeStep.knowledge_sources">Sources: {{ knowledgeStep.knowledge_sources.length }}</span>
+              <span>{{ knowledgeStep.duration_ms }} ms</span>
+            </div>
+          </div>
+
+          <div v-if="(retrievalSteps.length || knowledgeStep) && plannerStep" class="flow-arrow">↓ fan-in</div>
+          <div v-else-if="(retrievalSteps.length || knowledgeStep) && downstreamSteps.length" class="flow-arrow">↓</div>
 
           <div
             v-if="plannerStep"
@@ -145,7 +165,7 @@
           </div>
 
           <template v-for="(item, index) in downstreamSteps" :key="item.id">
-            <div v-if="index > 0 || plannerStep || (!retrievalSteps.length && coordinatorStep)" class="flow-arrow">↓</div>
+            <div v-if="index > 0 || plannerStep || (!retrievalSteps.length && !knowledgeStep && coordinatorStep)" class="flow-arrow">↓</div>
             <div
               class="agent-node downstream-node"
               :class="[
@@ -204,6 +224,18 @@
               </div>
               <div v-if="item.execution_plan.reason" class="coordinator-reason">
                 {{ item.execution_plan.reason }}
+              </div>
+            </div>
+
+            <div v-if="item.knowledge_provider || item.knowledge_sources?.length" class="knowledge-panel">
+              <div class="panel-title">Local Knowledge · {{ item.knowledge_provider || 'unknown provider' }}</div>
+              <div class="validation-meta">
+                <span>Traceable sources: {{ item.knowledge_sources?.length || 0 }}</span>
+              </div>
+              <div v-for="source in item.knowledge_sources || []" :key="source.url" class="knowledge-source">
+                <strong>{{ source.title || 'Source' }}</strong>
+                <a :href="source.url" target="_blank" rel="noreferrer">{{ source.url }}</a>
+                <span v-if="source.score != null">score {{ source.score }}</span>
               </div>
             </div>
 
@@ -302,6 +334,7 @@ const activeTrace = computed(() => {
 })
 const coordinatorStep = computed(() => [...activeTrace.value].reverse().find(item => item.agent === 'Coordinator'))
 const retrievalSteps = computed(() => activeTrace.value.filter(item => ['Attraction Agent', 'Weather Agent', 'Hotel Agent'].includes(item.agent)))
+const knowledgeStep = computed(() => activeTrace.value.find(item => item.agent === 'Local Knowledge Agent'))
 const plannerStep = computed(() => activeTrace.value.find(item => item.agent === 'Planner Agent'))
 const downstreamSteps = computed(() => activeTrace.value.filter(item => [
   'GIS Route Optimizer',
@@ -509,12 +542,14 @@ onMounted(loadTrace)
 }
 
 .coordinator-node,
+.knowledge-node,
 .planner-node,
 .downstream-node {
   width: min(680px, 100%);
 }
 
 .coordinator-node { background: #faf5ff; }
+.knowledge-node { background: #f0fdfa; }
 .planner-node { background: #eef2ff; }
 .downstream-node { background: #f0fdf4; }
 .repair-node { background: #fff7ed; }
@@ -556,7 +591,8 @@ onMounted(loadTrace)
 .validation-panel,
 .gis-panel,
 .lock-panel,
-.coordinator-panel {
+.coordinator-panel,
+.knowledge-panel {
   margin-top: 10px;
   padding: 12px;
   border-radius: 8px;
@@ -567,6 +603,20 @@ onMounted(loadTrace)
 .gis-panel { background: #f0f9ff; }
 .lock-panel { background: #fff7ed; }
 .coordinator-panel { background: #faf5ff; }
+.knowledge-panel { background: #f0fdfa; }
+
+.knowledge-source {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(220px, 2fr) auto;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 12px;
+  align-items: center;
+}
+
+.knowledge-source a {
+  overflow-wrap: anywhere;
+}
 
 .panel-title {
   font-weight: 700;
@@ -689,7 +739,8 @@ onMounted(loadTrace)
 
   .retry-row,
   .validation-issue,
-  .lock-violation {
+  .lock-violation,
+  .knowledge-source {
     grid-template-columns: 1fr;
   }
 }
