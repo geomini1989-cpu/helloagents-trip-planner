@@ -110,13 +110,19 @@ def _run_local_knowledge(planner: Any, request: TripRequest, attraction_context:
             {"title": item.title, "url": item.url, "score": item.score}
             for item in knowledge.sources
         ]
+        event["knowledge_claims"] = [item.to_dict() for item in knowledge.claims]
+        event["knowledge_claim_metrics"] = knowledge.claim_metrics()
         if knowledge.degraded:
             event["status"] = "fallback"
             event["error"] = knowledge.error
             event["error_category"] = "local_knowledge_unavailable"
+        elif knowledge.claim_parse_error:
+            event["status"] = "fallback"
+            event["error"] = knowledge.claim_parse_error
+            event["error_category"] = "local_knowledge_schema_invalid"
         else:
             event["status"] = "success"
-        event["result_preview"] = summary[:700]
+        event["result_preview"] = summary[:1000]
         return summary, event
     except AgentExecutionError as exc:
         event["status"] = "failed"
@@ -291,6 +297,18 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
             "error": "Attraction Agent unavailable",
             "error_category": "dependency_unavailable",
             "knowledge_sources": [],
+            "knowledge_claims": [],
+            "knowledge_claim_metrics": {
+                "total_claims": 0,
+                "supported_claims": 0,
+                "unsupported_claims": 0,
+                "unverified_claims": 0,
+                "supported_claim_rate": 0.0,
+                "unsupported_claim_rate": 0.0,
+                "unverified_claim_rate": 0.0,
+                "source_count": 0,
+                "claim_parse_error": None,
+            },
             "result_preview": local_knowledge,
         }
     results["local_knowledge"] = local_knowledge
