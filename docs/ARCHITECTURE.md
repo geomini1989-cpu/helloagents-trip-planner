@@ -2,21 +2,23 @@
 
 ## 1. System Goal
 
-Multi-Agent Trip Planner is designed as an Agent application rather than a text-generation demo. The system combines LLM-based semantic planning with deterministic task routing, real tools, GIS optimization, validation, repair, persistence, and observability.
+Multi-Agent Trip Planner is designed as an Agent application rather than a text-generation demo. The system combines semantic planning, multi-source retrieval, deterministic task routing, GIS optimization, validation, repair, persistence, and observability.
 
 The core design principle is:
 
 ```text
-Coordinator → understand the task type
-LLM         → semantic planning / revision
-MCP         → obtain real external data
-GIS         → calculate travel cost and visit order
-Rules       → validate hard constraints and protect locks
-Trace       → explain what happened
-Eval        → measure whether the system works
+Coordinator     → understand the task type
+LLM             → semantic planning / revision
+AMap MCP        → POI / weather / hotel / route data
+Web Search      → source-backed operating information
+Local Knowledge → verify opening / reservation / closure rules
+GIS             → calculate travel cost and visit order
+Rules           → validate hard constraints and protect locks
+Trace           → explain what happened
+Eval            → measure whether the system works
 ```
 
-The LLM never receives permission to invoke arbitrary Python functions. Coordinator output is treated as untrusted input and is converted into a backend-owned allow-listed execution graph.
+The LLM never receives permission to invoke arbitrary Python functions. Coordinator output is treated as untrusted input and converted into a backend-owned allow-listed execution graph.
 
 ## 2. Dynamic End-to-End Flow
 
@@ -27,6 +29,7 @@ flowchart TD
     C --> EP[Validated Execution Plan]
 
     EP -->|full_plan| FULL[Full Planning DAG]
+    EP -->|poi_rules_check| KFLOW[Local Knowledge → Revision → GIS → Validator]
     EP -->|weather_replan| WFLOW[Weather → Revision → GIS → Validator]
     EP -->|hotel_change| HFLOW[Hotel → Revision → GIS → Validator]
     EP -->|route_optimize| RFLOW[GIS → Validator]
@@ -35,19 +38,26 @@ flowchart TD
     FULL --> A[Attraction Agent]
     FULL --> W[Weather Agent]
     FULL --> H[Hotel Agent]
-    A --> MCP[AMap MCP]
-    W --> MCP
-    H --> MCP
+    A --> AMAP[AMap MCP]
+    W --> AMAP
+    H --> AMAP
+
+    A --> LK[Local Knowledge Agent]
+    LK --> WEB[Independent Web Search]
+
     A --> P[Planner Agent]
     W --> P
     H --> P
+    LK --> P
+
     P --> GIS[GIS Route Optimizer]
     GIS --> V[Deterministic Validator]
     V -->|blocking issues| R[Repair Agent]
     R --> GIS2[Post-Repair GIS]
     GIS2 --> V2[Revalidate]
 
-    WFLOW --> DB[(SQLite Session)]
+    KFLOW --> DB[(SQLite Session)]
+    WFLOW --> DB
     HFLOW --> DB
     RFLOW --> DB
     REVFLOW --> DB
@@ -58,164 +68,197 @@ flowchart TD
 
 ## 3. Coordinator / Router
 
-The Coordinator is request-scoped and classifies a natural-language task into one of five intents:
+The Coordinator is request-scoped and classifies a natural-language task into one of six intents:
 
 ```text
 full_plan
+poi_rules_check
 weather_replan
 hotel_change
 route_optimize
 general_revision
 ```
 
-It may suggest capabilities, but the backend does not execute that list directly. Instead, the selected intent is mapped to a canonical graph owned by Python code.
+It may suggest capabilities, but the backend does not execute that list directly. The selected intent maps to a canonical graph owned by Python code.
 
-Example LLM output:
+Example:
 
 ```json
 {
-  "intent": "weather_replan",
-  "requested_capabilities": ["weather", "revision", "gis", "validator"],
-  "reason": "用户要求根据降雨调整已有行程"
+  "intent": "poi_rules_check",
+  "requested_capabilities": ["local_knowledge", "revision", "gis", "validator"],
+  "reason": "用户要求核验景点预约与开放规则"
 }
 ```
 
-Canonical backend graph:
+The executable graph remains backend-owned:
 
 ```text
-Weather Agent
-     ↓
+Local Knowledge Agent
+        ↓
 Revision Agent
-     ↓
+        ↓
 GIS Optimizer
-     ↓
+        ↓
 Validator
 ```
 
-Unknown capabilities, custom edges, or invented function names are ignored. If the Coordinator LLM fails or returns invalid JSON, a deterministic heuristic router provides a visible fallback rather than failing the whole request.
+Unknown capabilities, custom edges, or invented function names are ignored. If the Coordinator LLM fails or returns invalid JSON, a deterministic heuristic router provides a visible fallback.
 
-### Why this design?
-
-A fully autonomous supervisor can decide both what to call and how to call it, but that is harder to test and easier to make unsafe or unstable. This project deliberately separates responsibilities:
+The separation is deliberate:
 
 ```text
 LLM  → classify semantic task
 Code → validate intent and own the executable DAG
 ```
 
-This preserves Agent flexibility without giving the model unrestricted orchestration control.
-
 ## 4. Canonical Task Graphs
 
 ### Full planning
+
+Local Knowledge depends on the attraction candidates, so it intentionally runs after the first fan-out rather than in parallel with Attraction.
 
 ```text
 Attraction ┐
 Weather    ├─ parallel fan-out
 Hotel      ┘
-    ↓ fan-in
-Planner
-    ↓
-GIS
-    ↓
-Validator
-    ↓ conditional
-Repair → GIS → Revalidate
+    │
+    └─ Attraction result → Local Knowledge
+                         ↓
+                Planner fan-in
+                         ↓
+                        GIS
+                         ↓
+                     Validator
+                         ↓ conditional
+                  Repair → GIS → Revalidate
 ```
+
+### POI operating-rule check
+
+```text
+Local Knowledge
+      ↓
+Revision
+      ↓
+GIS
+      ↓
+Validator
+```
+
+For an existing Session, Local Knowledge builds its query from POIs already present in the plan, so Attraction does not need to run again.
 
 ### Weather-driven re-plan
 
 ```text
-Weather
-   ↓
-Revision
-   ↓
-GIS
-   ↓
-Validator
+Weather → Revision → GIS → Validator
 ```
 
 ### Hotel change
 
 ```text
-Hotel
-  ↓
-Revision
-  ↓
-GIS
-  ↓
-Validator
+Hotel → Revision → GIS → Validator
 ```
 
 ### Route-only optimization
 
 ```text
-GIS
- ↓
-Validator
+GIS → Validator
 ```
 
-No Attraction, Weather, Hotel, Planner, or Revision Agent is called when the user only asks to reorder existing POIs.
+No Retrieval or Planner Agent is called when the user only asks to reorder existing POIs.
 
 ### General revision
 
 ```text
-Revision
-   ↓
-GIS
-   ↓
-Validator
+Revision → GIS → Validator
 ```
 
 ## 5. Agent Responsibilities
 
 ### Attraction Agent
-Retrieves candidate POIs and attraction-related information through AMap MCP.
+Retrieves candidate POIs, addresses and coordinate-oriented attraction data through AMap MCP.
+
+### Local Knowledge Agent
+Owns a separate information boundary. It verifies facts that map search alone is not sufficient to establish reliably:
+
+```text
+opening hours
+last-entry time
+reservation / real-name requirements
+fixed closure days
+ticket / admission rules
+temporary closures and holiday notices
+```
+
+The default retrieval provider is Tavily Web Search. Search obtains evidence; the Local Knowledge Agent interprets that evidence. It is explicitly forbidden from inventing operating facts when sources are missing.
+
+This Agent exists because it has a genuinely different data source and failure mode, not because the project needs a larger Agent count.
 
 ### Weather Agent
-Retrieves weather information. It is used during full planning and can also be selected dynamically for weather-driven revisions.
+Retrieves weather information through AMap MCP. It participates in full planning and weather-driven revisions.
 
 ### Hotel Agent
-Retrieves accommodation candidates. It can be selected independently when a later request only concerns lodging.
+Retrieves accommodation candidates through AMap MCP. It can be selected independently for hotel-only changes.
 
 ### Planner Agent
-Combines retrieval results and structured user constraints into a typed `TripPlan`. It owns semantic planning, not route optimization or hard-rule enforcement.
+Combines Attraction, Weather, Hotel, Local Knowledge and typed constraints into `TripPlan`. It owns semantic itinerary construction, not GIS ordering or deterministic rule enforcement.
 
 ### Repair Agent
-Runs only when full-plan deterministic validation finds blocking issues. It receives the current plan, structured constraints, and concrete validation failures and makes one bounded correction.
+Runs only when full-plan Validator finds blocking issues. It receives the current plan, constraints and concrete validation failures, then makes one bounded correction.
 
 ### Revision Agent
-Handles natural-language changes to an existing plan. Dynamic orchestration can enrich its input with newly retrieved Weather or Hotel context.
+Handles natural-language changes to an existing plan. Coordinator-selected Weather, Hotel or Local Knowledge results can be injected as fresh context before revision.
 
 ### Coordinator Agent
-Classifies the current task and explains the routing reason. It does not directly call tools and does not own the executable dependency graph.
+Classifies the task and explains routing. It does not directly call tools and does not own executable dependency edges.
 
-## 6. Orchestration Strategy
+## 6. Multi-Source Retrieval Boundary
 
-The system now has two complementary orchestration modes.
+The system distinguishes location data from operational knowledge:
+
+```text
+AMap MCP
+→ where is it?
+→ what POI is it?
+→ what is the route cost?
+→ weather / hotel candidates
+
+Independent Web Search
+→ can I visit on this date?
+→ does it require reservation?
+→ is there a closure or special notice?
+```
+
+For Local Knowledge, every usable summary keeps source URLs in Trace. Non-verified information remains a warning and must not silently become a hard fact.
+
+When `TAVILY_API_KEY` is absent, the Local Knowledge step explicitly falls back and tells downstream Agents not to guess missing rules.
+
+## 7. Orchestration Strategy
+
+The system has two complementary orchestration modes.
 
 ### Fixed DAG for known full-plan work
 
-A complete trip request has stable dependencies, so Attraction, Weather, and Hotel run in parallel and fan in to Planner. This is faster and more predictable than asking an LLM supervisor to rediscover the same graph every time.
+A complete trip request has stable dependencies. Attraction, Weather and Hotel run concurrently; Local Knowledge waits for Attraction candidates; Planner then receives all retrieval context. This is faster and more predictable than asking an LLM supervisor to rediscover the graph every time.
 
 ### Dynamic DAG selection for continuation tasks
 
-Later user requests vary. The Coordinator chooses the smallest canonical task graph that can satisfy the request.
-
-Examples:
+Later requests vary, so Coordinator selects the smallest canonical graph.
 
 ```text
-"明天下雨，把第二天改成室内" → Weather → Revision → GIS → Validator
-"酒店换便宜一点"             → Hotel → Revision → GIS → Validator
-"这三个景点怎么排最省时间"   → GIS → Validator
-"第三天轻松一点"             → Revision → GIS → Validator
+"故宫要预约吗？周一闭馆就调整" → Local Knowledge → Revision → GIS → Validator
+"明天下雨，把第二天改成室内"   → Weather → Revision → GIS → Validator
+"酒店换便宜一点"               → Hotel → Revision → GIS → Validator
+"这三个景点怎么排最省时间"     → GIS → Validator
+"第三天轻松一点"               → Revision → GIS → Validator
 ```
 
-This reduces unnecessary LLM/tool calls and makes the multi-Agent system task-aware instead of forcing every request through the same pipeline.
+This reduces unnecessary model/tool calls and makes the system task-aware without allowing unrestricted autonomous execution.
 
-## 7. Session Context
+## 8. Session Context
 
-SQLite now stores the original `TripRequest` together with the plan:
+SQLite stores the original `TripRequest` together with the plan:
 
 ```text
 session_id
@@ -228,13 +271,11 @@ created_at
 updated_at
 ```
 
-Persisting the original request matters because later GIS and Validator steps still need the original transportation mode and hard constraints. Legacy sessions without this field are handled with a conservative inference fallback.
+Later Local Knowledge, GIS and Validator steps can therefore recover dates, transportation mode and original hard constraints. Legacy sessions without the request field use conservative inference.
 
-## 8. Structured Constraints
+## 9. Structured Constraints
 
-The backend converts explicit natural-language requirements into typed constraints when they can be quantified safely.
-
-Supported examples include:
+Quantifiable user requirements become typed constraints, for example:
 
 ```text
 预算不超过 2500 元
@@ -243,14 +284,14 @@ Supported examples include:
 单段交通不要超过 45 分钟
 ```
 
-These constraints are passed to planning and later enforced by deterministic validation. Ambiguous preferences remain semantic preferences rather than being forced into hard constraints.
+These constraints are passed to planning and enforced again by deterministic validation. Ambiguous preferences remain semantic preferences.
 
-## 9. GIS Route Optimization
+## 10. GIS Route Optimization
 
-The system deliberately separates "which attractions should be visited" from "in which order should they be visited".
+The system separates "which attractions should be visited" from "in which order should they be visited".
 
 ```text
-Planner / existing plan chooses POI set
+Planner / current plan chooses POI set
         ↓
 POI coordinates
         ↓
@@ -258,30 +299,28 @@ Directed cost matrix
    ├─ AMap route time
    └─ Haversine fallback
         ↓
-Route permutation search
+Exact permutation search for small daily sets
         ↓
 Lower-cost visit order
 ```
 
-For normal daily itineraries with only a few attractions, exact permutation search is practical and avoids asking the LLM to guess spatial relationships.
+The optimizer records original/optimized order, travel minutes before/after, saved minutes, source and evaluated permutations.
 
-The optimizer records original/optimized order, travel minutes before/after, saved minutes, route-data source, and evaluated permutations.
+## 11. Deterministic Validation
 
-## 10. Deterministic Validation
+Validator checks issues that do not need another LLM:
 
-The validator checks issues that can be judged without another LLM, including:
-
-- requested trip length versus generated itinerary length
-- total budget limit
+- requested trip length
+- total budget
 - daily attraction-count limit
 - daily visit-time limit
 - duplicate attractions
-- maximum travel time between adjacent attractions
-- route data source and fallback state
+- maximum adjacent-route time
+- route-data source / fallback state
 
-Deterministic checks are repeatable, testable, and directly usable in evaluation metrics.
+These checks are repeatable and directly measurable in Eval.
 
-## 11. Repair Loop
+## 12. Repair Loop
 
 Full planning uses a bounded correction loop:
 
@@ -295,46 +334,47 @@ Generate
 → Stop
 ```
 
-The system does not allow unbounded Planner/Reviewer loops. If blocking issues remain, the run is marked degraded rather than being presented as fully successful.
+The system does not permit unbounded Planner/Reviewer loops. Unresolved blocking issues produce a degraded state.
 
-## 12. Revision Locks
+## 13. Revision Locks
 
-Users can preserve confirmed parts of the plan while changing another part.
+Users can preserve confirmed days, hotels or named attractions. The deterministic Lock Guard restores locked content changed by Revision or GIS and records violations in Trace.
 
-Example:
+## 14. Reliability
 
-```text
-第一天和酒店已经确定，不要改，把第三天改轻松一点。
-```
+Failures are classified into categories such as timeout, rate_limit, network, auth, validation and agent_error.
 
-Locks can cover specific days, all hotels/accommodation, or named attractions. The deterministic `Revision Lock Guard` restores any locked data changed by Revision or GIS and records the violation in the trace.
+Transient errors can retry with backoff; authentication errors do not retry; exhausted attempts become explicit fallback/degraded states. Fallback never fabricates POIs, weather, coordinates, Local Knowledge or successful tool calls.
 
-## 13. Reliability
+## 15. Observability
 
-Failures are classified into categories such as timeout, rate_limit, network, auth, validation, and agent_error.
-
-Retry behavior is category-aware. Authentication errors do not retry; transient failures may retry with backoff; exhausted attempts become explicit fallback/degraded states. Fallback behavior does not fabricate POIs, weather, coordinates, or successful tool results.
-
-## 14. Observability
-
-Trace can now show both the selected graph and its execution:
+Trace shows both routing and execution:
 
 ```text
 Coordinator
    ↓
 Execution Plan
    ↓
-selected Agent / GIS / Validator nodes
+Selected Agent / Local Knowledge / GIS / Validator nodes
    ↓
 Dynamic Orchestrator
 ```
 
-Each Coordinator event includes the intent, plan source (`llm` or `heuristic_fallback`), canonical capabilities, dependencies, and routing reason.
+Local Knowledge events additionally expose:
 
-Other trace events expose status, latency, attempts, retry history, tool names, validation issues, GIS before/after results, route source, lock violations, and degraded state.
+```text
+provider
+source title
+source URL
+relevance score
+fallback/error state
+latency
+```
 
-## 15. Why A2UI Is Not Used
+Other events expose status, attempts, retry history, validation issues, GIS before/after results, route sources, lock violations and degraded state.
 
-The current travel result has a stable and well-defined structure. The dynamic part is primarily the execution graph and data, not the UI schema.
+## 16. Why A2UI Is Not Used
 
-Typed `TripPlan` data rendered by deterministic Vue components is therefore easier to test and maintain. A2UI becomes reasonable only if the product evolves into a broader workspace where the Agent must dynamically choose fundamentally different interaction surfaces.
+The current result has a stable `TripPlan` structure. The dynamic part is the execution graph and business data, not the UI schema.
+
+Typed data rendered by deterministic Vue components is therefore easier to test and maintain. A2UI becomes useful only if the product evolves into a broader workspace where the Agent must dynamically select fundamentally different interaction surfaces.
