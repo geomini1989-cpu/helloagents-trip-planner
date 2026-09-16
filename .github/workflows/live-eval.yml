@@ -9,7 +9,7 @@ on:
 
 jobs:
   live-eval:
-    name: Live LLM + AMap + Local Knowledge Eval
+    name: Live Routing + Agent Eval
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -42,20 +42,40 @@ jobs:
         id: preflight
         shell: bash
         run: |
-          if [[ -z "$LLM_API_KEY" || -z "$AMAP_API_KEY" || -z "$TAVILY_API_KEY" ]]; then
-            echo "can_run=false" >> "$GITHUB_OUTPUT"
-            echo "Live Eval skipped: LLM_API_KEY, AMAP_API_KEY and TAVILY_API_KEY are required for the complete Agent pipeline."
+          if [[ -n "$LLM_API_KEY" ]]; then
+            echo "can_route=true" >> "$GITHUB_OUTPUT"
+            echo "Coordinator routing eval enabled."
           else
-            echo "can_run=true" >> "$GITHUB_OUTPUT"
-            echo "Live Eval credentials detected. Running three real cases with LLM, AMap and Local Knowledge web retrieval."
+            echo "can_route=false" >> "$GITHUB_OUTPUT"
+            echo "Routing Eval skipped: LLM_API_KEY is not configured."
           fi
 
-      - name: Run live eval (3 cases)
-        if: steps.preflight.outputs.can_run == 'true'
+          if [[ -n "$LLM_API_KEY" && -n "$AMAP_API_KEY" && -n "$TAVILY_API_KEY" ]]; then
+            echo "can_full=true" >> "$GITHUB_OUTPUT"
+            echo "Full Live Eval enabled with LLM, AMap and Local Knowledge retrieval."
+          else
+            echo "can_full=false" >> "$GITHUB_OUTPUT"
+            echo "Full Live Eval skipped: LLM_API_KEY, AMAP_API_KEY and TAVILY_API_KEY are all required."
+          fi
+
+      - name: Run Coordinator routing eval
+        if: steps.preflight.outputs.can_route == 'true'
+        run: python -m evals.run_routing_eval --output evals/reports/routing-live.json
+
+      - name: Run full live eval (3 cases)
+        if: steps.preflight.outputs.can_full == 'true'
         run: python -m evals.run_eval --limit 3 --output evals/reports/live.json
 
-      - name: Upload live eval report
-        if: steps.preflight.outputs.can_run == 'true' && always()
+      - name: Upload routing eval report
+        if: steps.preflight.outputs.can_route == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coordinator-routing-eval-report
+          path: backend/evals/reports/routing-live.json
+          if-no-files-found: warn
+
+      - name: Upload full live eval report
+        if: steps.preflight.outputs.can_full == 'true' && always()
         uses: actions/upload-artifact@v4
         with:
           name: live-agent-eval-report
