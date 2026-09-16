@@ -152,6 +152,21 @@ export interface LockViolation {
   message: string
 }
 
+export interface ExecutionPlanNode {
+  id: string
+  capability: string
+  depends_on: string[]
+  conditional: boolean
+}
+
+export interface ExecutionPlan {
+  intent: 'full_plan' | 'general_revision' | 'weather_replan' | 'hotel_change' | 'route_optimize' | string
+  source: 'llm' | 'heuristic_fallback' | string
+  reason: string
+  capabilities: string[]
+  nodes: ExecutionPlanNode[]
+}
+
 export interface ExecutionTraceEvent {
   id: string
   agent: string
@@ -173,6 +188,7 @@ export interface ExecutionTraceEvent {
   locks?: RevisionLocks
   violations?: LockViolation[]
   retried_steps?: number
+  execution_plan?: ExecutionPlan
 }
 
 export interface TripPlanResponse {
@@ -182,4 +198,5 @@ export interface TripPlanResponse {
   data?: TripPlan
   execution_trace?: ExecutionTraceEvent[]
   locks?: RevisionLocks
+  execution_plan?: ExecutionPlan
 }
