@@ -1,4 +1,4 @@
-"""多智能体任务编排、GIS 路线优化、执行追踪与验证修正闭环。"""
+"""多智能体任务编排、Local Knowledge、GIS 路线优化、执行追踪与验证修正闭环。"""
 
 from __future__ import annotations
 
@@ -76,6 +76,55 @@ def _run_step(
         event["error_category"] = exc.category
         event["retry_errors"] = _errors_to_dict(exc.errors)
         return f"{agent_name}执行失败（{exc.category}）：{exc}", event
+    finally:
+        event["duration_ms"] = round((time.perf_counter() - started) * 1000, 2)
+        event["finished_at"] = _utc_now()
+
+
+def _run_local_knowledge(planner: Any, request: TripRequest, attraction_context: str) -> Tuple[str, TraceEvent]:
+    settings = get_settings()
+    event: TraceEvent = {
+        "id": str(uuid.uuid4()),
+        "agent": "Local Knowledge Agent",
+        "task": "核验候选景点的开放时间、预约、闭馆、票务和临时公告",
+        "tool": "tavily_web_search",
+        "status": "running",
+        "started_at": _utc_now(),
+        "duration_ms": 0,
+        "attempts": 0,
+        "error": None,
+        "error_category": None,
+        "retry_errors": [],
+    }
+    started = time.perf_counter()
+    try:
+        (summary, knowledge), attempts, retry_errors = run_with_retry(
+            lambda: planner.research_local_knowledge(request, attraction_context),
+            max_retries=settings.agent_max_retries,
+            backoff_seconds=settings.agent_retry_backoff_seconds,
+        )
+        event["attempts"] = attempts
+        event["retry_errors"] = _errors_to_dict(retry_errors)
+        event["knowledge_provider"] = knowledge.provider
+        event["knowledge_sources"] = [
+            {"title": item.title, "url": item.url, "score": item.score}
+            for item in knowledge.sources
+        ]
+        if knowledge.degraded:
+            event["status"] = "fallback"
+            event["error"] = knowledge.error
+            event["error_category"] = "local_knowledge_unavailable"
+        else:
+            event["status"] = "success"
+        event["result_preview"] = summary[:700]
+        return summary, event
+    except AgentExecutionError as exc:
+        event["status"] = "failed"
+        event["attempts"] = exc.attempts
+        event["error"] = str(exc)
+        event["error_category"] = exc.category
+        event["retry_errors"] = _errors_to_dict(exc.errors)
+        return "Local Knowledge Agent 执行失败；不要猜测景点运营规则。", event
     finally:
         event["duration_ms"] = round((time.perf_counter() - started) * 1000, 2)
         event["finished_at"] = _utc_now()
@@ -160,10 +209,10 @@ def _run_gis_optimization(
 
 
 def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, List[TraceEvent]]:
-    """执行 fan-out/fan-in → Planner → GIS → Validator → optional Repair → GIS → Revalidate。
+    """执行 retrieval fan-out/fan-in → Local Knowledge → Planner → GIS → Validator → optional Repair。
 
+    Local Knowledge 依赖 Attraction 候选，因此在第一批并行检索完成后执行。
     自动修正最多执行一次，避免 Agent 在“生成—检查—重写”之间无限循环。
-    LLM 负责语义规划，GIS 负责路线顺序，Validator 负责确定性约束检查。
     """
     settings = get_settings()
     trace: List[TraceEvent] = []
@@ -216,10 +265,41 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
     order = {"Attraction Agent": 0, "Weather Agent": 1, "Hotel Agent": 2}
     trace.sort(key=lambda item: order.get(item["agent"], 99))
 
+    attraction_ok = any(
+        item.get("agent") == "Attraction Agent" and item.get("status") == "success"
+        for item in trace
+    )
+    if attraction_ok:
+        local_knowledge, knowledge_event = _run_local_knowledge(
+            planner,
+            request,
+            results.get("attractions", ""),
+        )
+    else:
+        now = _utc_now()
+        local_knowledge = "景点检索失败，未执行 Local Knowledge；不要猜测景点运营规则。"
+        knowledge_event = {
+            "id": str(uuid.uuid4()),
+            "agent": "Local Knowledge Agent",
+            "task": "核验候选景点运营规则",
+            "tool": "tavily_web_search",
+            "status": "fallback",
+            "started_at": now,
+            "finished_at": now,
+            "duration_ms": 0,
+            "attempts": 0,
+            "error": "Attraction Agent unavailable",
+            "error_category": "dependency_unavailable",
+            "knowledge_sources": [],
+            "result_preview": local_knowledge,
+        }
+    results["local_knowledge"] = local_knowledge
+    trace.append(knowledge_event)
+
     planner_event: TraceEvent = {
         "id": str(uuid.uuid4()),
         "agent": "Planner Agent",
-        "task": "汇总多 Agent 结果并生成满足硬约束的结构化行程",
+        "task": "汇总多 Agent、Local Knowledge 与硬约束生成结构化行程",
         "tool": None,
         "status": "running",
         "started_at": _utc_now(),
@@ -235,6 +315,7 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
         results.get("attractions", ""),
         results.get("weather", ""),
         results.get("hotels", ""),
+        results.get("local_knowledge", ""),
     )
 
     def _planner_once() -> tuple[str, TripPlan]:
@@ -348,7 +429,7 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
     trace.append({
         "id": str(uuid.uuid4()),
         "agent": "Orchestrator",
-        "task": "完成检索、规划、GIS 优化、校验与可选自动修正",
+        "task": "完成多源检索、本地知识核验、规划、GIS 优化、校验与可选自动修正",
         "tool": None,
         "status": "degraded" if degraded else "success",
         "started_at": trace[0]["started_at"] if trace else _utc_now(),
