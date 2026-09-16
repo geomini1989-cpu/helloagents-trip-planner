@@ -1,6 +1,6 @@
 """旅行会话持久化服务。
 
-使用 SQLite 保存当前计划、历史版本、Agent Trace 与 revision locks，保证服务重启后可恢复。
+使用 SQLite 保存当前计划、原始请求、历史版本、Agent Trace 与 revision locks，保证服务重启后可恢复。
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ def _init_db() -> None:
             CREATE TABLE IF NOT EXISTS trip_sessions (
                 session_id TEXT PRIMARY KEY,
                 current_plan TEXT NOT NULL,
+                request TEXT NOT NULL DEFAULT '{}',
                 history TEXT NOT NULL DEFAULT '[]',
                 execution_trace TEXT NOT NULL DEFAULT '[]',
                 locks TEXT NOT NULL DEFAULT '{}',
@@ -47,6 +48,8 @@ def _init_db() -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(trip_sessions)").fetchall()}
         if "locks" not in columns:
             conn.execute("ALTER TABLE trip_sessions ADD COLUMN locks TEXT NOT NULL DEFAULT '{}'")
+        if "request" not in columns:
+            conn.execute("ALTER TABLE trip_sessions ADD COLUMN request TEXT NOT NULL DEFAULT '{}'")
         conn.commit()
 
 
@@ -57,6 +60,7 @@ def create_session(
     plan_data: Dict[str, Any],
     execution_trace: Optional[List[Dict[str, Any]]] = None,
     locks: Optional[Dict[str, Any]] = None,
+    request: Optional[Dict[str, Any]] = None,
 ) -> str:
     """创建持久化会话并返回 session_id。"""
     session_id = str(uuid.uuid4())
@@ -66,12 +70,13 @@ def create_session(
         conn.execute(
             """
             INSERT INTO trip_sessions (
-                session_id, current_plan, history, execution_trace, locks, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                session_id, current_plan, request, history, execution_trace, locks, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
                 json.dumps(plan_data, ensure_ascii=False),
+                json.dumps(request or {}, ensure_ascii=False),
                 "[]",
                 json.dumps(execution_trace or [], ensure_ascii=False),
                 json.dumps(locks or {}, ensure_ascii=False),
@@ -85,7 +90,7 @@ def create_session(
 
 
 def get_session(session_id: str) -> Optional[Dict[str, Any]]:
-    """读取会话、历史记录、锁定状态与执行轨迹。"""
+    """读取会话、原始请求、历史记录、锁定状态与执行轨迹。"""
     with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM trip_sessions WHERE session_id = ?",
@@ -95,9 +100,11 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
     if not row:
         return None
 
+    request_payload = json.loads(row["request"] or "{}") if "request" in row.keys() else {}
     return {
         "session_id": row["session_id"],
         "current_plan": json.loads(row["current_plan"]),
+        "request": request_payload,
         "history": json.loads(row["history"]),
         "execution_trace": json.loads(row["execution_trace"]),
         "locks": json.loads(row["locks"] or "{}"),
