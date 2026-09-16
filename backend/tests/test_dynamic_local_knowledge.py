@@ -1,7 +1,11 @@
 from app.models.schemas import RevisionLocks, TripPlan
 from app.services.coordinator_service import validate_coordinator_output
 from app.services.dynamic_orchestration_service import execute_session_task
-from app.services.local_knowledge_service import LocalKnowledgeResult, LocalKnowledgeSource
+from app.services.local_knowledge_service import (
+    LocalKnowledgeClaim,
+    LocalKnowledgeResult,
+    LocalKnowledgeSource,
+)
 from app.services.validation_service import ValidationReport
 
 
@@ -23,7 +27,7 @@ class FakePlanner:
     def research_local_knowledge(self, request, attraction_context):
         assert "故宫" in attraction_context
         return (
-            "故宫需按官方规则预约。来源：https://example.org/official",
+            '{"verified_claims":[{"attraction":"故宫","claim_type":"reservation","claim":"参观需要提前预约","verification_status":"verified","source_url":"https://example.org/official","source_title":"官方参观须知"}],"unverified_claims":[],"safety_note":"Only verified claims are facts."}',
             LocalKnowledgeResult(
                 query="故宫 预约",
                 sources=[
@@ -32,6 +36,16 @@ class FakePlanner:
                         url="https://example.org/official",
                         content="参观须预约",
                         score=0.99,
+                    )
+                ],
+                claims=[
+                    LocalKnowledgeClaim(
+                        attraction="故宫",
+                        claim_type="reservation",
+                        claim="参观需要提前预约",
+                        verification_status="verified",
+                        source_url="https://example.org/official",
+                        source_title="官方参观须知",
                     )
                 ],
             ),
@@ -125,7 +139,7 @@ def test_poi_rules_check_injects_verified_context_into_revision(monkeypatch):
 
     assert TripPlan(**result).city == "北京"
     assert "https://example.org/official" in planner.revision_feedback
-    assert "仅把有来源且已核验的信息视为事实" in planner.revision_feedback
+    assert "仅把 verified_claims 视为事实" in planner.revision_feedback
     assert [item["agent"] for item in trace][:3] == [
         "Coordinator",
         "Local Knowledge Agent",
@@ -134,4 +148,6 @@ def test_poi_rules_check_injects_verified_context_into_revision(monkeypatch):
     knowledge_event = next(item for item in trace if item["agent"] == "Local Knowledge Agent")
     assert knowledge_event["knowledge_provider"] == "tavily"
     assert knowledge_event["knowledge_sources"][0]["url"] == "https://example.org/official"
+    assert knowledge_event["knowledge_claim_metrics"]["supported_claims"] == 1
+    assert knowledge_event["knowledge_claim_metrics"]["unsupported_claims"] == 0
     assert degraded is False
