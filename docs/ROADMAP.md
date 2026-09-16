@@ -13,9 +13,11 @@ The core Agent workflow is already implemented. The roadmap should focus on proo
 - [x] Original TripRequest persistence for later dynamic validation
 - [x] AMap MCP tool calling
 - [x] Local Knowledge Agent with independent Web Search source
-- [x] Source-backed opening / reservation / closure / admission-rule verification
-- [x] Explicit Local Knowledge degradation when Web Search is unavailable
-- [x] Local Knowledge provider/source URLs in Execution Trace
+- [x] Structured Local Knowledge claim schema
+- [x] Deterministic source-URL verification for `verified` claims
+- [x] Unsupported-claim filtering before Planner / Revision
+- [x] Explicit Local Knowledge degradation when Web Search is unavailable or claim JSON is invalid
+- [x] Local Knowledge provider / source URLs / claim metrics in Execution Trace
 - [x] Typed TripPlan output
 - [x] Structured hard constraints
 - [x] Natural-language constraint extraction
@@ -30,15 +32,40 @@ The core Agent workflow is already implemented. The roadmap should focus on proo
 - [x] Retry/backoff/error classification
 - [x] Request-scoped Agent instances
 - [x] Execution Trace UI
-- [x] Deterministic Agent Eval
+- [x] Full-flow deterministic Agent Eval runner
+- [x] Coordinator Routing Eval case set + runner
+- [x] Routing metrics: intent / exact graph / minimal graph / unnecessary Agent calls
+- [x] Local Knowledge grounding metrics: source coverage / schema validity / unsupported claim rate
 - [x] Offline CI
-- [x] Live Eval workflow with LLM / AMap / Tavily secret preflight
+- [x] Live Eval workflow with independent routing/full-pipeline secret preflight
 
-## P0 — Validate the Current System
+## P0 — Run Real Baselines
 
-### Real Live Eval
+The evaluation infrastructure now exists. The next milestone is no longer “add more eval code”; it is to run reproducible baselines with real credentials and use failures to drive changes.
 
-Configure real credentials and run the evaluation set:
+### Coordinator Routing Baseline
+
+Requires only:
+
+```text
+LLM_API_KEY
+```
+
+Run the full routing set and record:
+
+- intent accuracy
+- capability exact-match rate
+- minimal graph rate
+- fallback-router rate
+- unnecessary Agent call rate
+- missing capability rate
+- average capability reduction versus the full-plan graph
+
+The important question is whether Coordinator selects the smallest **correct** canonical graph, not whether its explanation sounds convincing.
+
+### Full Live Agent Baseline
+
+Requires:
 
 ```text
 LLM_API_KEY
@@ -46,56 +73,34 @@ AMAP_API_KEY
 TAVILY_API_KEY
 ```
 
-Goal:
+Run the real travel evaluation set and record:
 
-- collect reproducible baseline metrics
-- identify repeated failure modes
-- measure real AMap route coverage
-- measure GIS travel-time savings
-- measure repair success
-- measure Coordinator routing accuracy and unnecessary-Agent-call reduction
-- measure Local Knowledge source coverage and fallback rate
+- structured output success
+- AMap retrieval success
+- Local Knowledge source coverage
+- Local Knowledge unsupported-claim rate
+- deterministic validation pass rate
+- repair trigger / repair success
+- fallback / retry rate
+- GIS travel-time savings and route-source coverage
+- average / P95 end-to-end latency
 
 Do not optimize prompts before a baseline exists.
 
-### Dynamic Routing Eval
+### Local Knowledge Correctness / Freshness Eval
 
-Add a focused routing set covering at least:
-
-```text
-full planning
-POI opening/reservation rule check
-weather-driven re-plan
-hotel-only change
-route-only optimization
-general revision
-ambiguous continuation request
-```
+Source grounding is already checked deterministically: an invented URL cannot remain a verified claim. The next step is a small dated ground-truth set that evaluates whether the **supported claim itself** is correct and current.
 
 Track:
 
-- intent accuracy
-- selected capability accuracy
-- fallback-router rate
-- unnecessary Agent/tool calls
-- end-to-end latency by task type
-
-The important question is whether Coordinator selects the smallest correct canonical graph, not whether its explanation sounds convincing.
-
-### Local Knowledge Eval
-
-Build a small dated evaluation set for attractions with known operating rules.
-
-Track:
-
-- source coverage rate
-- official/first-party source rate
-- no-source fallback rate
-- unsupported-claim rate
-- stale/conflicting-source cases
+- first-party / official-source rate
+- dated-rule correctness
+- stale-source cases
+- conflicting-source cases
+- per-attraction source coverage
 - POI-rule-driven revision success
 
-Do not score an answer as correct merely because the LLM produced plausible opening hours. The claim must be traceable to retrieved evidence.
+Do not score plausible opening hours as correct unless the claim is traceable to retrieved evidence and matches the dated reference case.
 
 ### Failure Case Review
 
@@ -105,6 +110,7 @@ For each failed case, classify the root cause:
 coordinator misroute
 AMap retrieval failure
 Local Knowledge retrieval/source failure
+Local Knowledge schema/grounding failure
 LLM planning failure
 structured output failure
 route data failure
@@ -120,7 +126,7 @@ Turn recurring failures into regression tests where possible.
 
 The project currently uses the HelloAgents 0.2.x `SimpleAgent` + `MCPTool` interface for AMap.
 
-Next improvement should be stricter typed/native tool-calling semantics where supported, reducing dependence on prompt-formatted tool instructions.
+After the first real baseline, consider stricter typed/native tool-calling semantics where supported, reducing dependence on prompt-formatted tool instructions.
 
 Desired result:
 
@@ -200,7 +206,7 @@ Before using the project heavily in interviews:
 
 - add 2–3 screenshots or a short GIF
 - prepare one successful full-planning demo
-- prepare one Local Knowledge reservation/closure demo with visible source URLs
+- prepare one Local Knowledge reservation/closure demo with visible source URLs and claim status
 - prepare one Coordinator weather re-plan demo
 - prepare one route-only optimization demo showing skipped Agents
 - prepare one Validator → Repair demo
@@ -234,10 +240,10 @@ Potential product enhancement, but lower priority than real evaluation and relia
 The project is ready to be presented as a strong Agent-engineering portfolio item when all of the following are true:
 
 - offline CI passes consistently
-- live Eval has a reproducible baseline
-- dynamic routing Eval has a reproducible baseline
-- Local Knowledge has measurable source coverage and unsupported-claim checks
-- at least several failure cases have been analyzed and improved
+- live full-flow Eval has a reproducible baseline
+- Coordinator Routing Eval has a reproducible baseline
+- Local Knowledge has measured source coverage and unsupported-claim rate
+- at least several real failure cases have been analyzed and improved
 - no benchmark number in README/resume is invented
 - one end-to-end demo visibly shows Coordinator → selected task graph → multi-source retrieval / GIS / Validator → Trace
 - architecture and trade-offs can be explained without relying on framework buzzwords
