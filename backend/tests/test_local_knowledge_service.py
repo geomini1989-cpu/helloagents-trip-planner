@@ -1,6 +1,11 @@
 import json
 
-from app.services.local_knowledge_service import search_local_knowledge
+from app.services.local_knowledge_service import (
+    LocalKnowledgeResult,
+    LocalKnowledgeSource,
+    normalize_agent_claims,
+    search_local_knowledge,
+)
 
 
 class FakeResponse:
@@ -83,3 +88,76 @@ def test_provider_results_are_normalized_into_traceable_sources():
     assert captured["payload"]["max_results"] == 3
     assert "故宫" in captured["payload"]["query"]
     assert "URL: https://example.org/palace-notice" in result.as_agent_context()
+
+
+def _knowledge_result():
+    return LocalKnowledgeResult(
+        query="故宫 预约",
+        sources=[
+            LocalKnowledgeSource(
+                title="故宫博物院参观须知",
+                url="https://example.org/official",
+                content="参观须预约",
+                score=0.99,
+            )
+        ],
+    )
+
+
+def test_verified_claim_must_reference_current_search_source():
+    result = _knowledge_result()
+    context = normalize_agent_claims(
+        json.dumps({
+            "claims": [
+                {
+                    "attraction": "故宫",
+                    "claim_type": "reservation",
+                    "claim": "参观需要提前预约",
+                    "verification_status": "verified",
+                    "source_url": "https://example.org/official",
+                }
+            ],
+            "notes": [],
+        }, ensure_ascii=False),
+        result,
+    )
+
+    assert result.claim_parse_error is None
+    assert len(result.supported_claims) == 1
+    assert result.unsupported_claims == []
+    assert result.claim_metrics()["supported_claim_rate"] == 1.0
+    parsed_context = json.loads(context)
+    assert parsed_context["verified_claims"][0]["source_url"] == "https://example.org/official"
+
+
+def test_invented_source_url_is_marked_unsupported_and_filtered_from_planner_context():
+    result = _knowledge_result()
+    context = normalize_agent_claims(
+        json.dumps({
+            "claims": [
+                {
+                    "attraction": "故宫",
+                    "claim_type": "opening_hours",
+                    "claim": "每天凌晨开放",
+                    "verification_status": "verified",
+                    "source_url": "https://hallucinated.example/fake",
+                }
+            ]
+        }, ensure_ascii=False),
+        result,
+    )
+
+    assert result.supported_claims == []
+    assert len(result.unsupported_claims) == 1
+    assert result.claim_metrics()["unsupported_claim_rate"] == 1.0
+    parsed_context = json.loads(context)
+    assert parsed_context["verified_claims"] == []
+
+
+def test_invalid_agent_json_becomes_parse_error_with_no_trusted_claims():
+    result = _knowledge_result()
+    context = normalize_agent_claims("not-json", result)
+
+    assert result.claim_parse_error
+    assert result.claims == []
+    assert json.loads(context)["verified_claims"] == []
