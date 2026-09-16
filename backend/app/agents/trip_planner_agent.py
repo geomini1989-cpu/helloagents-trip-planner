@@ -11,6 +11,7 @@ from hello_agents.tools import MCPTool
 from ..config import get_settings
 from ..models.schemas import DayPlan, RevisionLocks, TripPlan, TripRequest
 from ..services.llm_service import get_llm
+from ..services.local_knowledge_service import LocalKnowledgeResult, search_local_knowledge
 from ..services.resilience_service import run_with_retry
 
 
@@ -35,7 +36,25 @@ HOTEL_AGENT_PROMPT = """你是酒店推荐专家。你的任务是根据城市�
 [TOOL_CALL:amap_maps_text_search:keywords=酒店,city=城市名]
 """
 
-PLANNER_AGENT_PROMPT = """你是行程规划专家。根据真实景点、天气、酒店信息和结构化硬约束，生成可执行的旅行计划。
+LOCAL_KNOWLEDGE_AGENT_PROMPT = """你是旅行景点本地知识核验专家。
+
+你的职责不是推荐更多景点，而是基于 Web Search 提供的候选来源，核验候选景点的运营规则：
+- 开放时间 / 停止入场时间
+- 是否需要预约、实名或提前购票
+- 固定闭馆日
+- 门票或入场限制
+- 临时关闭、节假日特殊公告
+
+规则：
+1. 优先采用景区官网、博物馆官网、政府/文旅部门、官方公众号对应网页等一手来源。
+2. 搜索结果不是官方来源时，要明确标记“非官方来源，需二次确认”。
+3. 不允许根据常识补造开放时间、门票、预约或临时公告。
+4. 不确定的信息必须写“未验证”，不要猜。
+5. 每条可执行规则后保留来源 URL，方便 Planner/用户追溯。
+6. 输出简洁的结构化文本，不要输出 TripPlan JSON。
+"""
+
+PLANNER_AGENT_PROMPT = """你是行程规划专家。根据真实景点、天气、酒店、本地运营规则和结构化硬约束，生成可执行的旅行计划。
 
 只输出完整、合法的 JSON。结构必须符合：
 {
@@ -106,6 +125,7 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。根据真实景点、天气
 5. day_index 从 0 连续递增。
 6. 硬约束优先级高于“尽量多安排景点”，必须遵守预算、每日景点数、游览总时长和交通时长限制。
 7. 尽量把同一区域的景点安排在同一天，减少跨区折返；最终顺序还会由 GIS 路线优化层处理。
+8. 对 Local Knowledge 中已核验的闭馆/预约/入场规则要主动避让；标记为“未验证”或非官方的信息只能作为提醒，不能编造成硬事实。
 """
 
 REVISE_AGENT_PROMPT = """你是行程规划修正专家。根据用户修改意见对当前 JSON 行程做局部调整。
@@ -168,13 +188,47 @@ class MultiAgentTripPlanner:
     def create_planner_agent(self) -> SimpleAgent:
         return SimpleAgent(name="行程规划专家", llm=self.llm, system_prompt=PLANNER_AGENT_PROMPT)
 
+    def create_local_knowledge_agent(self) -> SimpleAgent:
+        return SimpleAgent(name="本地知识核验专家", llm=self.llm, system_prompt=LOCAL_KNOWLEDGE_AGENT_PROMPT)
+
     def create_request_agents(self) -> Dict[str, SimpleAgent]:
         return {
             "attraction": self._create_tool_agent(name="景点搜索专家", prompt=ATTRACTION_AGENT_PROMPT),
             "weather": self._create_tool_agent(name="天气查询专家", prompt=WEATHER_AGENT_PROMPT),
             "hotel": self._create_tool_agent(name="酒店推荐专家", prompt=HOTEL_AGENT_PROMPT),
+            "local_knowledge": self.create_local_knowledge_agent(),
             "planner": self.create_planner_agent(),
         }
+
+    def research_local_knowledge(
+        self,
+        request: TripRequest,
+        attraction_context: str,
+    ) -> tuple[str, LocalKnowledgeResult]:
+        """Search independent web sources and let a dedicated Agent verify operational facts."""
+        result = search_local_knowledge(
+            city=request.city,
+            attraction_context=attraction_context,
+            start_date=request.start_date,
+            end_date=request.end_date,
+        )
+        source_context = result.as_agent_context()
+        if result.degraded or not result.sources:
+            return source_context, result
+
+        agent = self.create_local_knowledge_agent()
+        prompt = f"""旅行城市：{request.city}
+旅行日期：{request.start_date} 至 {request.end_date}
+
+候选景点检索上下文：
+{attraction_context[:5000]}
+
+Web Search 候选来源：
+{source_context}
+
+请只基于这些来源核验对行程真正有影响的开放、预约、闭馆、票务和临时公告信息。
+"""
+        return agent.run(prompt), result
 
     def plan_trip(self, request: TripRequest) -> TripPlan:
         """兼容旧调用方式；API 主流程使用 Orchestrator。"""
@@ -183,8 +237,15 @@ class MultiAgentTripPlanner:
             attraction_response = agents["attraction"].run(self._build_attraction_query(request))
             weather_response = agents["weather"].run(f"请查询{request.city}的天气信息")
             hotel_response = agents["hotel"].run(f"请搜索{request.city}的{request.accommodation}酒店")
+            local_knowledge, _ = self.research_local_knowledge(request, attraction_response)
             planner_response = agents["planner"].run(
-                self._build_planner_query(request, attraction_response, weather_response, hotel_response)
+                self._build_planner_query(
+                    request,
+                    attraction_response,
+                    weather_response,
+                    hotel_response,
+                    local_knowledge,
+                )
             )
             return self._parse_response(planner_response, request)
         except Exception as exc:
@@ -254,6 +315,7 @@ class MultiAgentTripPlanner:
         attractions: str,
         weather: str,
         hotels: str = "",
+        local_knowledge: str = "",
     ) -> str:
         constraints = request.constraints.model_dump() if hasattr(request.constraints, "model_dump") else request.constraints.dict()
         query = f"""请根据以下信息生成 {request.city} 的 {request.travel_days} 天旅行计划。
@@ -277,7 +339,11 @@ class MultiAgentTripPlanner:
 酒店工具结果：
 {hotels}
 
+Local Knowledge Agent 核验结果：
+{local_knowledge or '未提供；不要猜测景点开放/预约规则。'}
+
 请优先按地理邻近性安排同一天的景点，并保证预算、每日游览强度和交通成本合理。
+已核验的开放/预约/闭馆规则需要影响具体日期安排；未验证信息只能作为提醒。
 只返回完整 JSON。
 """
         if request.free_text_input:
