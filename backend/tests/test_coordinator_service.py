@@ -20,6 +20,23 @@ def test_weather_replan_builds_canonical_graph():
     assert plan.source == "llm"
 
 
+def test_poi_rules_check_builds_local_knowledge_graph():
+    plan = build_execution_plan(
+        "故宫需要提前预约吗？如果周一闭馆就帮我调整行程",
+        has_session=True,
+        llm_runner=lambda _: json.dumps({
+            "intent": "poi_rules_check",
+            "requested_capabilities": ["local_knowledge", "revision", "gis", "validator"],
+            "reason": "需要核验预约与闭馆规则",
+        }),
+    )
+
+    assert plan.intent == "poi_rules_check"
+    assert plan.capabilities == ["local_knowledge", "revision", "gis", "validator"]
+    assert plan.nodes[1].depends_on == ["local_knowledge"]
+    assert plan.source == "llm"
+
+
 def test_llm_cannot_inject_unknown_capability_or_edges():
     plan = validate_coordinator_output(
         {
@@ -43,8 +60,10 @@ def test_new_request_is_forced_to_full_plan():
     )
 
     assert plan.intent == "full_plan"
-    assert plan.capabilities[:3] == ["attraction", "weather", "hotel"]
-    assert plan.nodes[3].depends_on == ["attraction", "weather", "hotel"]
+    assert plan.capabilities[:4] == ["attraction", "weather", "hotel", "local_knowledge"]
+    assert plan.nodes[3].depends_on == ["attraction"]
+    assert plan.nodes[4].capability == "planner"
+    assert plan.nodes[4].depends_on == ["attraction", "weather", "hotel", "local_knowledge"]
 
 
 def test_session_full_plan_is_normalized_to_revision():
@@ -66,4 +85,16 @@ def test_invalid_llm_output_falls_back_to_deterministic_router():
 
     assert plan.intent == "route_optimize"
     assert plan.capabilities == ["gis", "validator"]
+    assert plan.source == "heuristic_fallback"
+
+
+def test_invalid_llm_output_routes_operating_rule_questions_to_local_knowledge():
+    plan = build_execution_plan(
+        "颐和园几点停止入场，要预约吗？",
+        has_session=True,
+        llm_runner=lambda _: "not-json",
+    )
+
+    assert plan.intent == "poi_rules_check"
+    assert plan.capabilities == ["local_knowledge", "revision", "gis", "validator"]
     assert plan.source == "heuristic_fallback"
