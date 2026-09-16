@@ -83,7 +83,7 @@ def _run_retrieval(
     task: str,
     tool: str,
     runner: Any,
-) -> Tuple[str, TraceEvent]:
+) -> Tuple[Any, TraceEvent]:
     settings = get_settings()
     started_at = _utc_now()
     started = time.perf_counter()
@@ -147,6 +147,18 @@ def _lock_event(locks: RevisionLocks, violations: List[Dict[str, Any]], *, stage
     }
 
 
+def _attraction_context_from_plan(plan: Dict[str, Any]) -> str:
+    """Build compact POI context for rule verification without another AMap retrieval."""
+    items: List[str] = []
+    for day in plan.get("days") or []:
+        for attraction in day.get("attractions") or []:
+            name = str(attraction.get("name") or "").strip()
+            address = str(attraction.get("address") or "").strip()
+            if name:
+                items.append(f"{name}（{address}）" if address else name)
+    return "；".join(dict.fromkeys(items))
+
+
 def execute_session_task(
     planner: Any,
     session: Dict[str, Any],
@@ -190,6 +202,37 @@ def execute_session_task(
         )
         trace.append(event)
         context_sections.append(f"最新酒店工具结果：\n{hotel}")
+
+    if "local_knowledge" in capabilities:
+        attraction_context = _attraction_context_from_plan(original_plan)
+        knowledge_result, event = _run_retrieval(
+            agent_name="Local Knowledge Agent",
+            task="核验当前行程景点的开放时间、预约、闭馆、票务与临时公告",
+            tool="tavily_web_search",
+            runner=lambda: planner.research_local_knowledge(request, attraction_context),
+        )
+        if isinstance(knowledge_result, tuple) and len(knowledge_result) == 2:
+            knowledge_summary, knowledge_meta = knowledge_result
+            event["knowledge_provider"] = knowledge_meta.provider
+            event["knowledge_sources"] = [
+                {"title": item.title, "url": item.url, "score": item.score}
+                for item in knowledge_meta.sources
+            ]
+            event["result_preview"] = str(knowledge_summary)[:700]
+            if knowledge_meta.degraded:
+                event["status"] = "fallback"
+                event["error"] = knowledge_meta.error
+                event["error_category"] = "local_knowledge_unavailable"
+            context_sections.append(
+                "最新景点运营规则核验结果：\n"
+                f"{knowledge_summary}\n"
+                "仅把有来源且已核验的信息视为事实；未验证信息不得补造。"
+            )
+        else:
+            context_sections.append(
+                "Local Knowledge Agent 未获得可靠结果；不要猜测开放时间、预约或闭馆规则。"
+            )
+        trace.append(event)
 
     if "revision" in capabilities:
         revision_started_at = _utc_now()
@@ -244,7 +287,6 @@ def execute_session_task(
         try:
             optimized, report = optimize_trip_routes(TripPlan(**candidate_plan), request)
             optimized_dict = optimized.model_dump() if hasattr(optimized, "model_dump") else optimized.dict()
-            # GIS is also subject to revision locks. A locked day must not be reordered.
             optimized_dict, gis_lock_violations = enforce_revision_locks(original_plan, optimized_dict, locks)
             candidate_plan = optimized_dict
             event["status"] = "success"
