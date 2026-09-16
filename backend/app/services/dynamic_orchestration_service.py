@@ -218,15 +218,21 @@ def execute_session_task(
                 {"title": item.title, "url": item.url, "score": item.score}
                 for item in knowledge_meta.sources
             ]
-            event["result_preview"] = str(knowledge_summary)[:700]
+            event["knowledge_claims"] = [item.to_dict() for item in knowledge_meta.claims]
+            event["knowledge_claim_metrics"] = knowledge_meta.claim_metrics()
+            event["result_preview"] = str(knowledge_summary)[:1000]
             if knowledge_meta.degraded:
                 event["status"] = "fallback"
                 event["error"] = knowledge_meta.error
                 event["error_category"] = "local_knowledge_unavailable"
+            elif knowledge_meta.claim_parse_error:
+                event["status"] = "fallback"
+                event["error"] = knowledge_meta.claim_parse_error
+                event["error_category"] = "local_knowledge_schema_invalid"
             context_sections.append(
                 "最新景点运营规则核验结果：\n"
                 f"{knowledge_summary}\n"
-                "仅把有来源且已核验的信息视为事实；未验证信息不得补造。"
+                "仅把 verified_claims 视为事实；unverified_claims 只能作为提醒。"
             )
         else:
             context_sections.append(
