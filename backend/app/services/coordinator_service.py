@@ -25,15 +25,16 @@ COORDINATOR_PROMPT = """你是旅行 Agent 系统的 Coordinator。你的任务�
 - weather_replan: 因天气/降雨/温度变化调整已有计划
 - hotel_change: 只调整酒店/住宿相关内容
 - route_optimize: 只优化已有景点的访问顺序或交通路线
+- poi_rules_check: 核验景点开放时间、预约、闭馆、门票/入场规则或临时公告，并据此调整已有计划
 
 允许的 capability 只有：
-attraction, weather, hotel, planner, revision, gis, validator, repair
+attraction, weather, hotel, local_knowledge, planner, revision, gis, validator, repair
 
 只输出 JSON：
 {
-  "intent": "weather_replan",
-  "requested_capabilities": ["weather", "revision", "gis", "validator"],
-  "reason": "用户要求根据降雨调整已有行程"
+  "intent": "poi_rules_check",
+  "requested_capabilities": ["local_knowledge", "revision", "gis", "validator"],
+  "reason": "用户要求确认景点预约与开放规则"
 }
 
 不要输出工具参数，不要输出 Python 函数名，不要创建新的 capability。
@@ -75,7 +76,8 @@ _CANONICAL_GRAPHS: Dict[str, List[ExecutionNode]] = {
         ExecutionNode("attraction", "attraction", []),
         ExecutionNode("weather", "weather", []),
         ExecutionNode("hotel", "hotel", []),
-        ExecutionNode("planner", "planner", ["attraction", "weather", "hotel"]),
+        ExecutionNode("local_knowledge", "local_knowledge", ["attraction"]),
+        ExecutionNode("planner", "planner", ["attraction", "weather", "hotel", "local_knowledge"]),
         ExecutionNode("gis", "gis", ["planner"]),
         ExecutionNode("validator", "validator", ["gis"]),
         ExecutionNode("repair", "repair", ["validator"], conditional=True),
@@ -99,6 +101,12 @@ _CANONICAL_GRAPHS: Dict[str, List[ExecutionNode]] = {
     ],
     "route_optimize": [
         ExecutionNode("gis", "gis", []),
+        ExecutionNode("validator", "validator", ["gis"]),
+    ],
+    "poi_rules_check": [
+        ExecutionNode("local_knowledge", "local_knowledge", []),
+        ExecutionNode("revision", "revision", ["local_knowledge"]),
+        ExecutionNode("gis", "gis", ["revision"]),
         ExecutionNode("validator", "validator", ["gis"]),
     ],
 }
@@ -127,10 +135,16 @@ def _heuristic_intent(message: str, *, has_session: bool) -> str:
     if not has_session:
         return "full_plan"
 
+    knowledge_terms = (
+        "开放时间", "几点开", "几点关", "闭馆", "休馆", "预约", "实名", "门票",
+        "停止入场", "入场规则", "临时关闭", "官方公告", "opening hours", "reservation",
+    )
     weather_terms = ("天气", "下雨", "降雨", "雨天", "晴天", "温度", "weather", "rain")
     hotel_terms = ("酒店", "住宿", "宾馆", "hotel", "accommodation")
     route_terms = ("路线", "顺序", "怎么排", "交通", "最省时间", "最短", "route", "order")
 
+    if any(term in text for term in knowledge_terms):
+        return "poi_rules_check"
     if any(term in text for term in weather_terms):
         return "weather_replan"
     if any(term in text for term in hotel_terms):
