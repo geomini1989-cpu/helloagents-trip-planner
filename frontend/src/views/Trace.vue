@@ -4,7 +4,7 @@
       <div>
         <div class="eyebrow">AGENT OBSERVABILITY</div>
         <h1>Agent Execution Trace</h1>
-        <p>查看 Coordinator 路由、动态任务图、Local Knowledge 来源、Agent / Tool、GIS、Validator、Lock Guard、重试与耗时。</p>
+        <p>查看 Coordinator 路由、动态任务图、Local Knowledge 来源与 Claim Grounding、Agent / Tool、GIS、Validator、Lock Guard、重试与耗时。</p>
       </div>
       <a-space>
         <a-button @click="loadTrace" :loading="loading">刷新</a-button>
@@ -140,7 +140,12 @@
             <div class="node-meta">
               <span v-if="knowledgeStep.tool">Tool: {{ knowledgeStep.tool }}</span>
               <span v-if="knowledgeStep.knowledge_provider">Provider: {{ knowledgeStep.knowledge_provider }}</span>
-              <span v-if="knowledgeStep.knowledge_sources">Sources: {{ knowledgeStep.knowledge_sources.length }}</span>
+              <span v-if="knowledgeStep.knowledge_claim_metrics">
+                Claims: {{ knowledgeStep.knowledge_claim_metrics.supported_claims }}/{{ knowledgeStep.knowledge_claim_metrics.total_claims }} supported
+              </span>
+              <span v-if="knowledgeStep.knowledge_claim_metrics?.unsupported_claims">
+                Unsupported: {{ knowledgeStep.knowledge_claim_metrics.unsupported_claims }}
+              </span>
               <span>{{ knowledgeStep.duration_ms }} ms</span>
             </div>
           </div>
@@ -227,10 +232,28 @@
               </div>
             </div>
 
-            <div v-if="item.knowledge_provider || item.knowledge_sources?.length" class="knowledge-panel">
-              <div class="panel-title">Local Knowledge · {{ item.knowledge_provider || 'unknown provider' }}</div>
+            <div v-if="item.knowledge_provider || item.knowledge_sources?.length || item.knowledge_claim_metrics" class="knowledge-panel">
+              <div class="panel-title">Local Knowledge Grounding · {{ item.knowledge_provider || 'unknown provider' }}</div>
               <div class="validation-meta">
-                <span>Traceable sources: {{ item.knowledge_sources?.length || 0 }}</span>
+                <span>Sources: {{ item.knowledge_sources?.length || 0 }}</span>
+                <span v-if="item.knowledge_claim_metrics">Supported: {{ item.knowledge_claim_metrics.supported_claims }}</span>
+                <span v-if="item.knowledge_claim_metrics">Unsupported: {{ item.knowledge_claim_metrics.unsupported_claims }}</span>
+                <span v-if="item.knowledge_claim_metrics">Unverified: {{ item.knowledge_claim_metrics.unverified_claims }}</span>
+              </div>
+              <div
+                v-for="(claim, index) in item.knowledge_claims || []"
+                :key="`${item.id}-claim-${index}`"
+                class="knowledge-claim"
+                :class="`claim-${claim.verification_status}`"
+              >
+                <div>
+                  <a-tag :color="claim.verification_status === 'verified' ? 'green' : claim.verification_status === 'unsupported' ? 'red' : 'orange'">
+                    {{ claim.verification_status }}
+                  </a-tag>
+                  <strong>{{ claim.attraction || 'POI' }} · {{ claim.claim_type }}</strong>
+                </div>
+                <span>{{ claim.claim }}</span>
+                <a v-if="claim.source_url" :href="claim.source_url" target="_blank" rel="noreferrer">{{ claim.source_url }}</a>
               </div>
               <div v-for="source in item.knowledge_sources || []" :key="source.url" class="knowledge-source">
                 <strong>{{ source.title || 'Source' }}</strong>
@@ -349,7 +372,6 @@ const downstreamSteps = computed(() => activeTrace.value.filter(item => [
 ].includes(item.agent)))
 const orchestratorStep = computed(() => [...activeTrace.value].reverse().find(item => ['Dynamic Orchestrator', 'Orchestrator'].includes(item.agent)))
 const problemCount = computed(() => trace.value.filter(item => ['failed', 'fallback', 'needs_revision', 'degraded', 'restored'].includes(item.status)).length)
-const retriedCount = computed(() => trace.value.filter(item => !item.agent.includes('Orchestrator') && Number(item.attempts || 1) > 1).length)
 const gisSavedMinutes = computed(() => trace.value.reduce((sum, item) => sum + Number(item.route_optimization?.saved_minutes || 0), 0))
 const lockRestoreCount = computed(() => trace.value.reduce((sum, item) => sum + Number(item.violations?.length || 0), 0))
 const totalDuration = computed(() => {
@@ -605,6 +627,39 @@ onMounted(loadTrace)
 .coordinator-panel { background: #faf5ff; }
 .knowledge-panel { background: #f0fdfa; }
 
+.knowledge-claim {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid #ccfbf1;
+  font-size: 12px;
+}
+
+.knowledge-claim > div {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.knowledge-claim a,
+.knowledge-source a {
+  overflow-wrap: anywhere;
+}
+
+.claim-unsupported {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.claim-unverified {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
 .knowledge-source {
   display: grid;
   grid-template-columns: minmax(140px, 1fr) minmax(220px, 2fr) auto;
@@ -612,10 +667,6 @@ onMounted(loadTrace)
   margin-top: 8px;
   font-size: 12px;
   align-items: center;
-}
-
-.knowledge-source a {
-  overflow-wrap: anywhere;
 }
 
 .panel-title {
