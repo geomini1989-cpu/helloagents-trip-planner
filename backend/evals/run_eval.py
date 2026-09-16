@@ -1,7 +1,8 @@
 """Deterministic evaluation runner for the Multi-Agent Trip Planner.
 
-Measures structured output, retrieval success, retry/fallback behavior, deterministic
-constraint validation, automatic repair outcomes and latency without LLM-as-a-Judge.
+Measures structured output, retrieval success, Local Knowledge source grounding,
+retry/fallback behavior, deterministic constraint validation, automatic repair outcomes
+and latency without LLM-as-a-Judge.
 
 Run from backend/:
     python -m evals.run_eval
@@ -120,6 +121,7 @@ def evaluate_case(
 ) -> Dict[str, Any]:
     planner_event = next((item for item in trace if item.get("agent") == "Planner Agent"), None)
     retrieval_events = [item for item in trace if item.get("agent") in RETRIEVAL_AGENTS]
+    knowledge_event = next((item for item in trace if item.get("agent") == "Local Knowledge Agent"), None)
     orchestrator_event = next((item for item in trace if item.get("agent") == "Orchestrator"), None)
     validation_event = _final_validation_event(trace)
     repair_event = next((item for item in trace if item.get("agent") == "Repair Agent"), None)
@@ -131,6 +133,11 @@ def evaluate_case(
         validation_event
         and validation_event.get("validation_report", {}).get("passed") is True
     )
+
+    knowledge_metrics = (knowledge_event or {}).get("knowledge_claim_metrics", {}) or {}
+    unsupported_claims = int(knowledge_metrics.get("unsupported_claims", 0) or 0)
+    claim_parse_error = knowledge_metrics.get("claim_parse_error")
+    fallback_used = any(item.get("status") == "fallback" for item in trace)
 
     checks = {
         "city_matches_request": plan.city == request.city,
@@ -145,8 +152,9 @@ def evaluate_case(
         "all_retrieval_agents_succeeded": len(retrieval_events) == 3
         and all(item.get("status") == "success" for item in retrieval_events),
         "planner_structured_output_succeeded": planner_event is not None and planner_event.get("status") == "success",
+        "local_knowledge_has_no_unsupported_claims": unsupported_claims == 0 and not claim_parse_error,
         "deterministic_validation_passed": validation_passed,
-        "no_fallback_used": planner_event is not None and planner_event.get("status") != "fallback",
+        "no_fallback_used": not fallback_used,
     }
 
     passed_checks = sum(1 for passed in checks.values() if passed)
@@ -160,12 +168,21 @@ def evaluate_case(
         "check_score": round(passed_checks / total_checks, 4),
         "checks": checks,
         "failed_checks": failed_checks,
-        "fallback_used": planner_event is not None and planner_event.get("status") == "fallback",
+        "fallback_used": fallback_used,
         "validation_passed": validation_passed,
         "repair_triggered": repair_event is not None,
         "repair_succeeded": repair_event is not None and repair_event.get("status") == "success",
         "retrieval_successes": sum(item.get("status") == "success" for item in retrieval_events),
         "retrieval_steps": len(retrieval_events),
+        "local_knowledge": {
+            "status": (knowledge_event or {}).get("status", "missing"),
+            "source_count": int(knowledge_metrics.get("source_count", 0) or 0),
+            "total_claims": int(knowledge_metrics.get("total_claims", 0) or 0),
+            "supported_claims": int(knowledge_metrics.get("supported_claims", 0) or 0),
+            "unsupported_claims": unsupported_claims,
+            "unverified_claims": int(knowledge_metrics.get("unverified_claims", 0) or 0),
+            "claim_parse_error": claim_parse_error,
+        },
         "retried_steps": sum(
             1 for item in trace
             if item.get("agent") != "Orchestrator" and int(item.get("attempts", 1) or 1) > 1
@@ -203,6 +220,15 @@ def aggregate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         for result in results
     )
 
+    knowledge_cases = [result["local_knowledge"] for result in results]
+    knowledge_source_covered = sum(item["source_count"] > 0 for item in knowledge_cases)
+    knowledge_degraded = sum(item["status"] in {"fallback", "failed", "missing"} for item in knowledge_cases)
+    knowledge_schema_valid = sum(not item["claim_parse_error"] for item in knowledge_cases)
+    total_claims = sum(item["total_claims"] for item in knowledge_cases)
+    supported_claims = sum(item["supported_claims"] for item in knowledge_cases)
+    unsupported_claims = sum(item["unsupported_claims"] for item in knowledge_cases)
+    unverified_claims = sum(item["unverified_claims"] for item in knowledge_cases)
+
     error_categories: Counter[str] = Counter()
     for result in results:
         for event in result["trace"]:
@@ -221,6 +247,18 @@ def aggregate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "average_check_score": round(sum(result["check_score"] for result in results) / total_cases, 4) if total_cases else 0.0,
         "structured_output_success_rate": _percentage(planner_successes, total_cases),
         "retrieval_agent_success_rate": _percentage(retrieval_successes, retrieval_steps),
+        "local_knowledge_source_coverage_rate": _percentage(knowledge_source_covered, total_cases),
+        "local_knowledge_degraded_rate": _percentage(knowledge_degraded, total_cases),
+        "local_knowledge_schema_valid_rate": _percentage(knowledge_schema_valid, total_cases),
+        "local_knowledge_supported_claim_rate": _percentage(supported_claims, total_claims),
+        "local_knowledge_unsupported_claim_rate": _percentage(unsupported_claims, total_claims),
+        "local_knowledge_unverified_claim_rate": _percentage(unverified_claims, total_claims),
+        "local_knowledge_claims": {
+            "total": total_claims,
+            "supported": supported_claims,
+            "unsupported": unsupported_claims,
+            "unverified": unverified_claims,
+        },
         "validation_pass_rate": _percentage(validation_passes, total_cases),
         "repair_trigger_rate": _percentage(repair_cases, total_cases),
         "repair_success_rate": _percentage(repair_successes, repair_cases),
@@ -235,25 +273,33 @@ def aggregate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 def print_summary(metrics: Dict[str, Any], results: List[Dict[str, Any]]) -> None:
     print("\n=== Multi-Agent Trip Planner Eval ===")
     print(f"Cases: {metrics['passed_cases']}/{metrics['total_cases']} passed")
-    print(f"Case pass rate:              {metrics['case_pass_rate']:.2%}")
-    print(f"Average check score:         {metrics['average_check_score']:.2%}")
-    print(f"Structured output success:   {metrics['structured_output_success_rate']:.2%}")
-    print(f"Retrieval agent success:     {metrics['retrieval_agent_success_rate']:.2%}")
-    print(f"Validation pass rate:        {metrics['validation_pass_rate']:.2%}")
-    print(f"Repair trigger rate:         {metrics['repair_trigger_rate']:.2%}")
-    print(f"Repair success rate:         {metrics['repair_success_rate']:.2%}")
-    print(f"Fallback rate:               {metrics['fallback_rate']:.2%}")
-    print(f"Agent step retry rate:       {metrics['agent_step_retry_rate']:.2%}")
-    print(f"Average latency:             {metrics['average_latency_ms']:.2f} ms")
-    print(f"P95 latency:                 {metrics['p95_latency_ms']:.2f} ms")
+    print(f"Case pass rate:                    {metrics['case_pass_rate']:.2%}")
+    print(f"Average check score:               {metrics['average_check_score']:.2%}")
+    print(f"Structured output success:         {metrics['structured_output_success_rate']:.2%}")
+    print(f"Retrieval agent success:           {metrics['retrieval_agent_success_rate']:.2%}")
+    print(f"Local Knowledge source coverage:   {metrics['local_knowledge_source_coverage_rate']:.2%}")
+    print(f"Local Knowledge degraded rate:     {metrics['local_knowledge_degraded_rate']:.2%}")
+    print(f"Local Knowledge schema valid:      {metrics['local_knowledge_schema_valid_rate']:.2%}")
+    print(f"Local Knowledge supported claims:  {metrics['local_knowledge_supported_claim_rate']:.2%}")
+    print(f"Local Knowledge unsupported claims:{metrics['local_knowledge_unsupported_claim_rate']:.2%}")
+    print(f"Validation pass rate:              {metrics['validation_pass_rate']:.2%}")
+    print(f"Repair trigger rate:               {metrics['repair_trigger_rate']:.2%}")
+    print(f"Repair success rate:               {metrics['repair_success_rate']:.2%}")
+    print(f"Fallback rate:                     {metrics['fallback_rate']:.2%}")
+    print(f"Agent step retry rate:             {metrics['agent_step_retry_rate']:.2%}")
+    print(f"Average latency:                   {metrics['average_latency_ms']:.2f} ms")
+    print(f"P95 latency:                       {metrics['p95_latency_ms']:.2f} ms")
 
     print("\nCase details:")
     for result in results:
         status = "PASS" if result["passed"] else "FAIL"
         failures = ", ".join(result["failed_checks"]) or "-"
+        knowledge = result["local_knowledge"]
         print(
             f"  [{status}] {result['id']}: score={result['check_score']:.2%}, "
-            f"latency={result['latency_ms']:.0f}ms, repair={result['repair_triggered']}, failed={failures}"
+            f"latency={result['latency_ms']:.0f}ms, repair={result['repair_triggered']}, "
+            f"knowledge_sources={knowledge['source_count']}, unsupported={knowledge['unsupported_claims']}, "
+            f"failed={failures}"
         )
 
 
@@ -307,7 +353,7 @@ def main() -> int:
 
     metrics = aggregate_results(results)
     report = {
-        "evaluation": "multi-agent-trip-planner-deterministic-v2",
+        "evaluation": "multi-agent-trip-planner-deterministic-v3",
         "metrics": metrics,
         "results": results,
     }
