@@ -4,7 +4,7 @@
       <div>
         <div class="eyebrow">AGENT OBSERVABILITY</div>
         <h1>Agent Execution Trace</h1>
-        <p>查看检索、规划、GIS 路线优化、约束校验、自动修正、锁定保护、重试与耗时。</p>
+        <p>查看 Coordinator 路由、动态任务图、Agent / Tool、GIS、Validator、Lock Guard、重试与耗时。</p>
       </div>
       <a-space>
         <a-button @click="loadTrace" :loading="loading">刷新</a-button>
@@ -49,8 +49,8 @@
         type="warning"
         show-icon
         class="degraded-alert"
-        message="本次任务存在降级或未完全解决的约束冲突"
-        description="可能是 Agent / Tool / GIS 失败、Planner fallback，或自动修正后仍未通过 Validator。请查看下方执行明细。"
+        message="最近一次任务存在降级或未完全解决的约束冲突"
+        description="可能是 Agent / Tool / GIS 失败、Coordinator fallback，或修改后仍未通过 Validator。请查看下方执行明细。"
       />
 
       <a-alert
@@ -59,12 +59,53 @@
         show-icon
         class="degraded-alert"
         :message="`Lock Guard 已恢复 ${lockRestoreCount} 处被误改的锁定内容`"
-        description="Revision Agent 的候选修改触碰了用户锁定字段，后端已恢复原值；未锁定部分仍保留修改结果。"
+        description="Agent 或 GIS 的候选修改触碰了用户锁定字段，后端已恢复原值；未锁定部分仍保留修改结果。"
       />
 
-      <a-card class="pipeline-card" :bordered="false" title="任务编排链路">
+      <a-card v-if="coordinatorStep?.execution_plan" class="coordinator-card" :bordered="false" title="最近一次 Coordinator 决策">
+        <div class="coordinator-grid">
+          <div>
+            <div class="metric-label">Intent</div>
+            <strong>{{ coordinatorStep.execution_plan.intent }}</strong>
+          </div>
+          <div>
+            <div class="metric-label">Router Source</div>
+            <a-tag :color="coordinatorStep.execution_plan.source === 'llm' ? 'blue' : 'orange'">
+              {{ coordinatorStep.execution_plan.source }}
+            </a-tag>
+          </div>
+          <div class="coordinator-capabilities">
+            <div class="metric-label">Selected Capabilities</div>
+            <a-space wrap>
+              <a-tag v-for="capability in coordinatorStep.execution_plan.capabilities" :key="capability">
+                {{ capability }}
+              </a-tag>
+            </a-space>
+          </div>
+        </div>
+        <div v-if="coordinatorStep.execution_plan.reason" class="coordinator-reason">
+          {{ coordinatorStep.execution_plan.reason }}
+        </div>
+      </a-card>
+
+      <a-card class="pipeline-card" :bordered="false" title="最近一次任务编排链路">
         <div class="pipeline">
-          <div class="parallel-group">
+          <template v-if="coordinatorStep">
+            <div class="agent-node coordinator-node" :class="`status-${coordinatorStep.status}`">
+              <div class="node-top">
+                <strong>{{ coordinatorStep.agent }}</strong>
+                <a-tag :color="statusColor(coordinatorStep.status)">{{ coordinatorStep.status }}</a-tag>
+              </div>
+              <div class="node-task">{{ coordinatorStep.task }}</div>
+              <div class="node-meta" v-if="coordinatorStep.execution_plan">
+                <span>Intent: {{ coordinatorStep.execution_plan.intent }}</span>
+                <span>Source: {{ coordinatorStep.execution_plan.source }}</span>
+              </div>
+            </div>
+            <div class="flow-arrow">↓ selected task graph</div>
+          </template>
+
+          <div v-if="retrievalSteps.length" class="parallel-group" :class="{ 'single-retrieval': retrievalSteps.length === 1 }">
             <div
               v-for="item in retrievalSteps"
               :key="item.id"
@@ -84,7 +125,8 @@
             </div>
           </div>
 
-          <div class="flow-arrow">↓ fan-in</div>
+          <div v-if="retrievalSteps.length && plannerStep" class="flow-arrow">↓ fan-in</div>
+          <div v-else-if="retrievalSteps.length && downstreamSteps.length" class="flow-arrow">↓</div>
 
           <div
             v-if="plannerStep"
@@ -102,8 +144,8 @@
             </div>
           </div>
 
-          <template v-for="item in downstreamSteps" :key="item.id">
-            <div class="flow-arrow">↓</div>
+          <template v-for="(item, index) in downstreamSteps" :key="item.id">
+            <div v-if="index > 0 || plannerStep || (!retrievalSteps.length && coordinatorStep)" class="flow-arrow">↓</div>
             <div
               class="agent-node downstream-node"
               :class="[
@@ -111,7 +153,8 @@
                 {
                   'repair-node': item.agent === 'Repair Agent',
                   'gis-node': item.agent.includes('GIS'),
-                  'lock-node': item.agent === 'Revision Lock Guard'
+                  'lock-node': item.agent === 'Revision Lock Guard',
+                  'orchestrator-node': item.agent.includes('Orchestrator')
                 }
               ]"
             >
@@ -137,7 +180,7 @@
         </div>
       </a-card>
 
-      <a-card class="detail-card" :bordered="false" title="执行明细">
+      <a-card class="detail-card" :bordered="false" title="完整 Session 执行历史">
         <a-timeline>
           <a-timeline-item
             v-for="item in trace"
@@ -152,6 +195,17 @@
             <div v-if="item.tool" class="timeline-tool">Tool · {{ item.tool }}</div>
             <div v-if="item.error_category" class="error-category">Error · {{ item.error_category }}</div>
             <div v-if="item.error" class="timeline-error">{{ item.error }}</div>
+
+            <div v-if="item.execution_plan" class="coordinator-panel">
+              <div class="panel-title">Execution Plan · {{ item.execution_plan.intent }}</div>
+              <div class="validation-meta">
+                <span>Source: {{ item.execution_plan.source }}</span>
+                <span>Capabilities: {{ item.execution_plan.capabilities.join(' → ') }}</span>
+              </div>
+              <div v-if="item.execution_plan.reason" class="coordinator-reason">
+                {{ item.execution_plan.reason }}
+              </div>
+            </div>
 
             <div v-if="item.route_optimization" class="gis-panel">
               <div class="panel-title">GIS Route Optimization</div>
@@ -242,9 +296,14 @@ const trace = ref<ExecutionTraceEvent[]>([])
 const loading = ref(false)
 
 const shortSessionId = computed(() => sessionId.value ? `${sessionId.value.slice(0, 8)}…${sessionId.value.slice(-4)}` : '-')
-const retrievalSteps = computed(() => trace.value.filter(item => ['Attraction Agent', 'Weather Agent', 'Hotel Agent'].includes(item.agent)))
-const plannerStep = computed(() => trace.value.find(item => item.agent === 'Planner Agent'))
-const downstreamSteps = computed(() => trace.value.filter(item => [
+const activeTrace = computed(() => {
+  const lastCoordinator = trace.value.map(item => item.agent).lastIndexOf('Coordinator')
+  return lastCoordinator >= 0 ? trace.value.slice(lastCoordinator) : trace.value
+})
+const coordinatorStep = computed(() => [...activeTrace.value].reverse().find(item => item.agent === 'Coordinator'))
+const retrievalSteps = computed(() => activeTrace.value.filter(item => ['Attraction Agent', 'Weather Agent', 'Hotel Agent'].includes(item.agent)))
+const plannerStep = computed(() => activeTrace.value.find(item => item.agent === 'Planner Agent'))
+const downstreamSteps = computed(() => activeTrace.value.filter(item => [
   'GIS Route Optimizer',
   'Trip Validator',
   'Repair Agent',
@@ -252,15 +311,17 @@ const downstreamSteps = computed(() => trace.value.filter(item => [
   'Post-Repair Validator',
   'Revision Agent',
   'Revision Lock Guard',
+  'Dynamic Orchestrator',
+  'Orchestrator',
 ].includes(item.agent)))
-const orchestratorStep = computed(() => trace.value.find(item => item.agent === 'Orchestrator'))
+const orchestratorStep = computed(() => [...activeTrace.value].reverse().find(item => ['Dynamic Orchestrator', 'Orchestrator'].includes(item.agent)))
 const problemCount = computed(() => trace.value.filter(item => ['failed', 'fallback', 'needs_revision', 'degraded', 'restored'].includes(item.status)).length)
-const retriedCount = computed(() => trace.value.filter(item => item.agent !== 'Orchestrator' && Number(item.attempts || 1) > 1).length)
+const retriedCount = computed(() => trace.value.filter(item => !item.agent.includes('Orchestrator') && Number(item.attempts || 1) > 1).length)
 const gisSavedMinutes = computed(() => trace.value.reduce((sum, item) => sum + Number(item.route_optimization?.saved_minutes || 0), 0))
 const lockRestoreCount = computed(() => trace.value.reduce((sum, item) => sum + Number(item.violations?.length || 0), 0))
 const totalDuration = computed(() => {
   if (orchestratorStep.value) return orchestratorStep.value.duration_ms
-  return Math.round(trace.value.reduce((sum, item) => sum + Number(item.duration_ms || 0), 0) * 100) / 100
+  return Math.round(activeTrace.value.reduce((sum, item) => sum + Number(item.duration_ms || 0), 0) * 100) / 100
 })
 
 const statusColor = (status: string) => {
@@ -357,10 +418,32 @@ onMounted(loadTrace)
   margin-bottom: 20px;
 }
 
+.coordinator-card,
 .pipeline-card,
 .detail-card {
   margin-top: 20px;
   border-radius: 14px;
+}
+
+.coordinator-card {
+  background: #f8fafc;
+}
+
+.coordinator-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 2fr;
+  gap: 20px;
+  align-items: start;
+}
+
+.coordinator-capabilities {
+  min-width: 0;
+}
+
+.coordinator-reason {
+  margin-top: 12px;
+  color: #64748b;
+  line-height: 1.6;
 }
 
 .pipeline {
@@ -374,6 +457,11 @@ onMounted(loadTrace)
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
+}
+
+.parallel-group.single-retrieval {
+  grid-template-columns: minmax(0, 680px);
+  justify-content: center;
 }
 
 .agent-node {
@@ -420,16 +508,19 @@ onMounted(loadTrace)
   font-weight: 600;
 }
 
+.coordinator-node,
 .planner-node,
 .downstream-node {
   width: min(680px, 100%);
 }
 
+.coordinator-node { background: #faf5ff; }
 .planner-node { background: #eef2ff; }
 .downstream-node { background: #f0fdf4; }
 .repair-node { background: #fff7ed; }
 .gis-node { background: #f0f9ff; }
 .lock-node { background: #fff7ed; }
+.orchestrator-node { background: #f8fafc; }
 
 .timeline-title span {
   color: #94a3b8;
@@ -464,7 +555,8 @@ onMounted(loadTrace)
 
 .validation-panel,
 .gis-panel,
-.lock-panel {
+.lock-panel,
+.coordinator-panel {
   margin-top: 10px;
   padding: 12px;
   border-radius: 8px;
@@ -474,6 +566,7 @@ onMounted(loadTrace)
 
 .gis-panel { background: #f0f9ff; }
 .lock-panel { background: #fff7ed; }
+.coordinator-panel { background: #faf5ff; }
 
 .panel-title {
   font-weight: 700;
@@ -577,6 +670,10 @@ onMounted(loadTrace)
 @media (max-width: 1000px) {
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .coordinator-grid {
+    grid-template-columns: 1fr;
   }
 }
 
