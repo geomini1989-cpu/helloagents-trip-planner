@@ -9,7 +9,7 @@ on:
 
 jobs:
   live-eval:
-    name: Live LLM + AMap Eval
+    name: Live LLM + AMap + Local Knowledge Eval
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -22,6 +22,7 @@ jobs:
       OPENAI_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
       OPENAI_MODEL: qwen-plus
       AMAP_API_KEY: ${{ secrets.AMAP_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
 
     steps:
       - name: Checkout
@@ -41,12 +42,12 @@ jobs:
         id: preflight
         shell: bash
         run: |
-          if [[ -z "$LLM_API_KEY" || -z "$AMAP_API_KEY" ]]; then
+          if [[ -z "$LLM_API_KEY" || -z "$AMAP_API_KEY" || -z "$TAVILY_API_KEY" ]]; then
             echo "can_run=false" >> "$GITHUB_OUTPUT"
-            echo "Live Eval skipped: repository secrets LLM_API_KEY and/or AMAP_API_KEY are not configured."
+            echo "Live Eval skipped: LLM_API_KEY, AMAP_API_KEY and TAVILY_API_KEY are required for the complete Agent pipeline."
           else
             echo "can_run=true" >> "$GITHUB_OUTPUT"
-            echo "Live Eval credentials detected. Running three real cases."
+            echo "Live Eval credentials detected. Running three real cases with LLM, AMap and Local Knowledge web retrieval."
           fi
 
       - name: Run live eval (3 cases)
