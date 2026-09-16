@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -13,8 +11,10 @@ from pydantic import BaseModel, Field
 from ...agents.trip_planner_agent import get_trip_planner_agent
 from ...models.schemas import RevisionLocks, TripRequest
 from ...services.constraint_service import merge_constraints_from_text
+from ...services.coordinator_service import build_execution_plan
+from ...services.dynamic_orchestration_service import coordinator_trace_event, execute_session_task
 from ...services.orchestration_service import execute_trip_plan
-from ...services.revision_lock_service import enforce_revision_locks, merge_revision_locks
+from ...services.revision_lock_service import merge_revision_locks
 from ...services.session_service import (
     create_session,
     get_session,
@@ -32,6 +32,19 @@ class ReviseRequest(BaseModel):
     locks: Optional[RevisionLocks] = None
 
 
+class DispatchRequest(BaseModel):
+    """统一自然语言任务入口。
+
+    没有 session_id 时需要 trip_request，Coordinator 会进入 full_plan；
+    有 session_id 时会在已有计划上动态选择 Weather/Hotel/Revision/GIS/Validator。
+    """
+
+    message: str = Field(..., min_length=1)
+    session_id: Optional[str] = None
+    trip_request: Optional[TripRequest] = None
+    locks: Optional[RevisionLocks] = None
+
+
 class TripResponseWithSession(BaseModel):
     success: bool
     message: str
@@ -39,6 +52,7 @@ class TripResponseWithSession(BaseModel):
     data: Any
     execution_trace: List[Dict[str, Any]] = Field(default_factory=list)
     locks: RevisionLocks = Field(default_factory=RevisionLocks)
+    execution_plan: Optional[Dict[str, Any]] = None
 
 
 def _utc_now() -> str:
@@ -49,6 +63,40 @@ def _lock_payload(locks: RevisionLocks) -> Dict[str, Any]:
     return locks.model_dump() if hasattr(locks, "model_dump") else locks.dict()
 
 
+def _model_dump(value: Any) -> Dict[str, Any]:
+    return value.model_dump() if hasattr(value, "model_dump") else value.dict()
+
+
+def _append_message_to_request(request: TripRequest, message: str) -> TripRequest:
+    payload = _model_dump(request)
+    existing = str(payload.get("free_text_input") or "").strip()
+    payload["free_text_input"] = "；".join(part for part in [existing, message.strip()] if part)
+    return TripRequest(**payload)
+
+
+def _execute_existing_session(
+    *,
+    session: Dict[str, Any],
+    feedback: str,
+    explicit_locks: Optional[RevisionLocks],
+) -> tuple[Dict[str, Any], List[Dict[str, Any]], RevisionLocks, Dict[str, Any]]:
+    effective_locks = merge_revision_locks(
+        session.get("locks", {}),
+        feedback,
+        explicit=explicit_locks,
+    )
+    execution_plan = build_execution_plan(feedback, has_session=True)
+    planner = get_trip_planner_agent()
+    protected_plan, trace_events, _ = execute_session_task(
+        planner,
+        session,
+        feedback,
+        effective_locks,
+        execution_plan,
+    )
+    return protected_plan, trace_events, effective_locks, execution_plan.to_dict()
+
+
 @router.post(
     "/plan",
     response_model=TripResponseWithSession,
@@ -56,15 +104,20 @@ def _lock_payload(locks: RevisionLocks) -> Dict[str, Any]:
     description="并行执行专业 Agent，经过 GIS 路线优化和确定性 Validator 后按需自动修正行程",
 )
 async def plan_trip(request: TripRequest):
-    """生成旅行计划，并返回完整 Agent / GIS / Validator 执行轨迹。"""
+    """显式完整规划入口；适合表单式前端。"""
     try:
         effective_request = merge_constraints_from_text(request)
         planner = get_trip_planner_agent()
         trip_plan, execution_trace = execute_trip_plan(planner, effective_request)
 
-        plan_dict = trip_plan.model_dump() if hasattr(trip_plan, "model_dump") else trip_plan.dict()
+        plan_dict = _model_dump(trip_plan)
         empty_locks = RevisionLocks()
-        session_id = create_session(plan_dict, execution_trace, _lock_payload(empty_locks))
+        session_id = create_session(
+            plan_dict,
+            execution_trace,
+            _lock_payload(empty_locks),
+            request=_model_dump(effective_request),
+        )
 
         return TripResponseWithSession(
             success=True,
@@ -79,81 +132,100 @@ async def plan_trip(request: TripRequest):
 
 
 @router.post(
+    "/dispatch",
+    response_model=TripResponseWithSession,
+    summary="Coordinator 动态任务入口",
+    description="根据自然语言任务生成白名单 Execution Plan，并动态选择需要的 Agent / GIS / Validator。",
+)
+async def dispatch_trip_task(request: DispatchRequest):
+    """统一入口：新任务走完整规划，已有 Session 走动态任务图。"""
+    if request.session_id:
+        session = get_session(request.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="会话不存在或已失效")
+        try:
+            plan, trace, locks, execution_plan = _execute_existing_session(
+                session=session,
+                feedback=request.message,
+                explicit_locks=request.locks,
+            )
+            lock_payload = _lock_payload(locks)
+            updated = update_session_plan(
+                request.session_id,
+                plan,
+                feedback=request.message,
+                execution_trace=trace,
+                locks=lock_payload,
+            )
+            if not updated:
+                raise HTTPException(status_code=404, detail="会话不存在或已失效")
+            return TripResponseWithSession(
+                success=True,
+                message="动态任务执行完成",
+                session_id=request.session_id,
+                data=plan,
+                execution_trace=trace,
+                locks=locks,
+                execution_plan=execution_plan,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"动态任务执行失败: {exc}") from exc
+
+    if request.trip_request is None:
+        raise HTTPException(status_code=400, detail="新任务需要提供 trip_request；已有计划请提供 session_id")
+
+    try:
+        execution_plan = build_execution_plan(request.message, has_session=False)
+        effective_request = merge_constraints_from_text(
+            _append_message_to_request(request.trip_request, request.message)
+        )
+        planner = get_trip_planner_agent()
+        trip_plan, base_trace = execute_trip_plan(planner, effective_request)
+        trace = [coordinator_trace_event(execution_plan), *base_trace]
+        empty_locks = RevisionLocks()
+        session_id = create_session(
+            _model_dump(trip_plan),
+            trace,
+            _lock_payload(empty_locks),
+            request=_model_dump(effective_request),
+        )
+        return TripResponseWithSession(
+            success=True,
+            message="Coordinator 已完成完整旅行规划",
+            session_id=session_id,
+            data=trip_plan,
+            execution_trace=trace,
+            locks=empty_locks,
+            execution_plan=execution_plan.to_dict(),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"动态规划失败: {exc}") from exc
+
+
+@router.post(
     "/revise",
     response_model=TripResponseWithSession,
-    summary="修改旅行计划",
-    description="根据自然语言反馈修改现有计划，并用确定性 Lock Guard 保护已锁定内容",
+    summary="动态修改旅行计划",
+    description="Coordinator 根据反馈动态选择 Weather/Hotel/Revision/GIS/Validator，并用 Lock Guard 保护已锁定内容。",
 )
 async def revise_trip(request: ReviseRequest):
-    """修改旅行计划；锁定内容即使被 LLM 误改，也会被后端恢复并记录。"""
+    """保持原 API 兼容，但内部已经升级为动态任务编排。"""
     session = get_session(request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在或已失效")
 
-    effective_locks = merge_revision_locks(
-        session.get("locks", {}),
-        request.feedback,
-        explicit=request.locks,
-    )
-    lock_payload = _lock_payload(effective_locks)
-
-    planner = get_trip_planner_agent()
-    started_at = _utc_now()
-    started = time.perf_counter()
-    revision_event: Dict[str, Any] = {
-        "id": str(uuid.uuid4()),
-        "agent": "Revision Agent",
-        "task": "根据用户反馈局部修改既有行程，同时遵守 revision locks",
-        "tool": None,
-        "status": "running",
-        "started_at": started_at,
-        "duration_ms": 0,
-        "error": None,
-        "locks": lock_payload,
-    }
-
     try:
-        candidate_plan = planner.revise_trip(
-            session["current_plan"],
-            request.feedback,
-            effective_locks,
+        protected_plan, trace_events, effective_locks, execution_plan = _execute_existing_session(
+            session=session,
+            feedback=request.feedback,
+            explicit_locks=request.locks,
         )
-        revision_event["status"] = "success"
-        revision_event["result_preview"] = "Revision Agent 已生成局部修改候选方案"
     except Exception as exc:
-        revision_event["status"] = "failed"
-        revision_event["error"] = str(exc)
         raise HTTPException(status_code=500, detail=f"修改失败: {exc}") from exc
-    finally:
-        revision_event["duration_ms"] = round((time.perf_counter() - started) * 1000, 2)
-        revision_event["finished_at"] = _utc_now()
 
-    protected_plan, violations = enforce_revision_locks(
-        session["current_plan"],
-        candidate_plan,
-        effective_locks,
-    )
-    lock_guard_event: Dict[str, Any] = {
-        "id": str(uuid.uuid4()),
-        "agent": "Revision Lock Guard",
-        "task": "确定性检查并保护锁定日期、酒店和景点",
-        "tool": "deterministic_lock_rules",
-        "status": "restored" if violations else "success",
-        "started_at": _utc_now(),
-        "finished_at": _utc_now(),
-        "duration_ms": 0,
-        "attempts": 1,
-        "error": None,
-        "locks": lock_payload,
-        "violations": violations,
-        "result_preview": (
-            f"检测到 {len(violations)} 处锁定内容被 Agent 修改，已恢复原值。"
-            if violations
-            else "锁定内容保持不变。"
-        ),
-    }
-
-    trace_events = [revision_event, lock_guard_event]
+    lock_payload = _lock_payload(effective_locks)
     updated = update_session_plan(
         request.session_id,
         protected_plan,
@@ -171,6 +243,7 @@ async def revise_trip(request: ReviseRequest):
         data=protected_plan,
         execution_trace=trace_events,
         locks=effective_locks,
+        execution_plan=execution_plan,
     )
 
 
@@ -194,7 +267,7 @@ async def set_revision_locks(session_id: str, locks: RevisionLocks):
 @router.get(
     "/session/{session_id}",
     summary="读取会话",
-    description="读取当前计划、历史版本、revision locks 和完整 Agent 执行轨迹",
+    description="读取原始请求、当前计划、历史版本、revision locks 和完整 Agent 执行轨迹",
 )
 async def read_session(session_id: str):
     session = get_session(session_id)
@@ -204,6 +277,7 @@ async def read_session(session_id: str):
     return {
         "success": True,
         "session_id": session_id,
+        "request": session.get("request", {}),
         "data": session["current_plan"],
         "history": session["history"],
         "locks": session.get("locks", {}),
@@ -216,7 +290,7 @@ async def read_session(session_id: str):
 @router.get(
     "/trace/{session_id}",
     summary="读取 Agent Execution Trace",
-    description="返回该会话的 Agent、GIS Optimizer、Validator、Repair 与 Lock Guard 执行轨迹",
+    description="返回该会话的 Coordinator、Agent、GIS Optimizer、Validator、Repair 与 Lock Guard 执行轨迹",
 )
 async def read_execution_trace(session_id: str):
     trace = get_session_trace(session_id)
@@ -238,7 +312,7 @@ async def health_check():
             "status": "healthy",
             "service": "multi-agent-trip-planner",
             "persistence": "sqlite",
-            "orchestration": "fan-out-fan-in-gis-validate-repair",
+            "orchestration": "coordinator + validated-task-graph + fan-out-fan-in-gis-validate-repair",
             "revision_guard": "persistent-locks",
         }
     except Exception as exc:
