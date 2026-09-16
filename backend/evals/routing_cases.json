@@ -1,0 +1,86 @@
+[
+  {
+    "id": "new-full-plan-beijing",
+    "message": "帮我规划一个北京三天的历史文化旅行，预算适中",
+    "has_session": false,
+    "expected_intent": "full_plan",
+    "expected_capabilities": ["attraction", "weather", "hotel", "local_knowledge", "planner", "gis", "validator", "repair"]
+  },
+  {
+    "id": "new-full-plan-vague",
+    "message": "下周去杭州玩两天，帮我安排一下",
+    "has_session": false,
+    "expected_intent": "full_plan",
+    "expected_capabilities": ["attraction", "weather", "hotel", "local_knowledge", "planner", "gis", "validator", "repair"]
+  },
+  {
+    "id": "weather-rain-replan",
+    "message": "明天下雨，把第二天改成室内活动，酒店别动",
+    "has_session": true,
+    "expected_intent": "weather_replan",
+    "expected_capabilities": ["weather", "revision", "gis", "validator"]
+  },
+  {
+    "id": "weather-temperature-replan",
+    "message": "后天气温突然很高，把户外安排调轻松一点",
+    "has_session": true,
+    "expected_intent": "weather_replan",
+    "expected_capabilities": ["weather", "revision", "gis", "validator"]
+  },
+  {
+    "id": "hotel-cheaper",
+    "message": "酒店太贵了，换一家便宜一点的，其他行程不要动",
+    "has_session": true,
+    "expected_intent": "hotel_change",
+    "expected_capabilities": ["hotel", "revision", "gis", "validator"]
+  },
+  {
+    "id": "hotel-location",
+    "message": "住宿换到市中心附近，景点安排尽量保持不变",
+    "has_session": true,
+    "expected_intent": "hotel_change",
+    "expected_capabilities": ["hotel", "revision", "gis", "validator"]
+  },
+  {
+    "id": "route-reorder",
+    "message": "这三个景点怎么排最省时间？不要换景点",
+    "has_session": true,
+    "expected_intent": "route_optimize",
+    "expected_capabilities": ["gis", "validator"]
+  },
+  {
+    "id": "route-shortest",
+    "message": "只重新优化一下现在景点的访问顺序，路线尽量短",
+    "has_session": true,
+    "expected_intent": "route_optimize",
+    "expected_capabilities": ["gis", "validator"]
+  },
+  {
+    "id": "general-revision-light",
+    "message": "第三天太累了，轻松一点，其他天不要改",
+    "has_session": true,
+    "expected_intent": "general_revision",
+    "expected_capabilities": ["revision", "gis", "validator"]
+  },
+  {
+    "id": "general-revision-remove-poi",
+    "message": "第二天少安排一个景点，整体节奏慢一点",
+    "has_session": true,
+    "expected_intent": "general_revision",
+    "expected_capabilities": ["revision", "gis", "validator"]
+  },
+  {
+    "id": "poi-reservation-rule",
+    "message": "故宫需要预约吗？如果需要就把提醒和行程一起调整好",
+    "has_session": true,
+    "expected_intent": "poi_rules_check",
+    "expected_capabilities": ["local_knowledge", "revision", "gis", "validator"]
+  },
+  {
+    "id": "poi-closure-rule",
+    "message": "确认一下博物馆那天会不会闭馆，如果闭馆就调整当天计划",
+    "has_session": true,
+    "expected_intent": "poi_rules_check",
+    "expected_capabilities": ["local_knowledge", "revision", "gis", "validator"]
+  }
+]
