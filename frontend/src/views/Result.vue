@@ -925,9 +925,22 @@ const restoreMap = () => {
 
 // 初始化地图
 const initMap = async () => {
+  const amapJsKey = import.meta.env.VITE_AMAP_WEB_JS_KEY?.trim()
+  const amapSecurityJsCode = import.meta.env.VITE_AMAP_SECURITY_JS_CODE?.trim()
+
+  if (!amapJsKey || !amapSecurityJsCode) {
+    console.error('高德地图配置不完整，请检查 VITE_AMAP_WEB_JS_KEY 和 VITE_AMAP_SECURITY_JS_CODE')
+    message.error('高德地图未配置，请检查前端 .env')
+    return
+  }
+
   try {
+    window._AMapSecurityConfig = {
+      securityJsCode: amapSecurityJsCode
+    }
+
     const AMap = await AMapLoader.load({
-      key: import.meta.env.VITE_AMAP_WEB_JS_KEY,  // 高德地图Web端(JS API) Key
+      key: amapJsKey,
       version: '2.0',
       plugins: ['AMap.Marker', 'AMap.Polyline', 'AMap.InfoWindow']
     })

@@ -33,6 +33,8 @@ class RouteProvider(Protocol):
         origin_city: Optional[str] = None,
         destination_city: Optional[str] = None,
         route_type: str = "transit",
+        origin_location: Any = None,
+        destination_location: Any = None,
     ) -> Dict[str, Any]: ...
 
 
@@ -109,6 +111,8 @@ def _route_type(transportation: str) -> str:
     text = transportation.lower()
     if "自驾" in transportation or "drive" in text:
         return "driving"
+    if any(keyword in transportation for keyword in ("公共交通", "公交", "地铁")) or "transit" in text:
+        return "transit"
     if "步行" in transportation or "walk" in text:
         return "walking"
     return "transit"
@@ -168,6 +172,8 @@ def _route_cost(
             origin_city=city,
             destination_city=city,
             route_type=route_type,
+            origin_location=origin.location,
+            destination_location=destination.location,
         )
         duration = route.get("duration_seconds")
         if duration is None:

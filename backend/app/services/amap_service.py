@@ -2,7 +2,7 @@
 
 from typing import List, Dict, Any, Optional
 from hello_agents.tools import MCPTool
-from ..config import get_settings
+from ..config import get_settings, is_configured_secret
 from ..models.schemas import Location, POIInfo, WeatherInfo
 
 # 全局MCP工具实例
@@ -21,8 +21,11 @@ def get_amap_mcp_tool() -> MCPTool:
     if _amap_mcp_tool is None:
         settings = get_settings()
         
-        if not settings.amap_api_key:
-            raise ValueError("高德地图API Key未配置,请在.env文件中设置AMAP_API_KEY")
+        if not is_configured_secret(settings.amap_api_key):
+            raise ValueError(
+                "高德地图 Web 服务 Key 未配置,"
+                "请在 .env 文件中设置 AMAP_API_KEY"
+            )
         
         # 创建MCP工具
         _amap_mcp_tool = MCPTool(

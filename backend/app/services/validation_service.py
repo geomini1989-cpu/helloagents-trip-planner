@@ -2,7 +2,8 @@
 
 Validator 不依赖另一个 LLM 来判断“好不好”，而是把可以明确检查的约束
 （预算、每日强度、重复景点、相邻景点交通耗时等）做成可重复执行的规则。
-路线优先使用高德 MCP；外部路线不可用时退化为经纬度距离估算，并显式记录来源。
+路线优先使用高德 Web 服务 REST API；外部路线不可用时退化为经纬度距离估算，
+并显式记录来源。
 """
 
 from __future__ import annotations
@@ -69,13 +70,15 @@ def _route_type(transportation: str) -> str:
     text = transportation.lower()
     if "自驾" in transportation or "drive" in text:
         return "driving"
+    if any(keyword in transportation for keyword in ("公共交通", "公交", "地铁")) or "transit" in text:
+        return "transit"
     if "步行" in transportation or "walk" in text:
         return "walking"
     return "transit"
 
 
 def _estimate_minutes(distance_km: float, route_type: str) -> int:
-    # 只作为 MCP 路线不可用时的 fallback；刻意使用保守速度。
+    # 只作为高德路线不可用时的 fallback；刻意使用保守速度。
     speed_kmh = {"walking": 4.5, "driving": 25.0, "transit": 18.0}.get(route_type, 18.0)
     return max(1, round(distance_km / speed_kmh * 60))
 
@@ -165,12 +168,14 @@ def validate_trip_plan(plan: TripPlan, request: TripRequest, *, check_routes: bo
                         origin_city=request.city,
                         destination_city=request.city,
                         route_type=route_type,
+                        origin_location=left.location,
+                        destination_location=right.location,
                     )
                     if route.get("duration_seconds") is not None:
                         route_minutes = max(1, round(float(route["duration_seconds"]) / 60))
                         if route.get("distance_meters") is not None:
                             distance_km = round(float(route["distance_meters"]) / 1000, 2)
-                        source = "amap_mcp"
+                        source = "amap_rest"
                 except Exception:
                     # 路线工具失败时仍可完成校验，但必须标记为估算来源。
                     route_minutes = None

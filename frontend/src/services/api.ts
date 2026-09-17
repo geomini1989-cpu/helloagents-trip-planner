@@ -5,7 +5,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 120000, // 2分钟超时
+  timeout: 300000, // 完整多 Agent 规划的最后保护超时：5 分钟
   headers: {
     'Content-Type': 'application/json'
   }
@@ -44,6 +44,9 @@ export async function generateTripPlan(formData: TripFormData): Promise<TripPlan
     return response.data
   } catch (error: any) {
     console.error('生成旅行计划失败:', error)
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('行程规划超时，请稍后重试或缩短行程天数')
+    }
     throw new Error(error.response?.data?.detail || error.message || '生成旅行计划失败')
   }
 }

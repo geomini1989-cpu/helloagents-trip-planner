@@ -184,18 +184,11 @@
         <!-- 加载进度条 -->
         <a-form-item v-if="loading">
           <div class="loading-container">
-            <a-progress
-              :percent="loadingProgress"
-              status="active"
-              :stroke-color="{
-                '0%': '#667eea',
-                '100%': '#764ba2',
-              }"
-              :stroke-width="10"
-            />
+            <a-spin size="large" />
             <p class="loading-status">
               {{ loadingStatus }}
             </p>
+            <p class="loading-elapsed">已等待 {{ loadingElapsed }} 秒</p>
           </div>
         </a-form-item>
       </a-form>
@@ -218,7 +211,7 @@ type TripFormState = Omit<TripFormData, 'start_date' | 'end_date'> & {
 
 const router = useRouter()
 const loading = ref(false)
-const loadingProgress = ref(0)
+const loadingElapsed = ref(0)
 const loadingStatus = ref('')
 
 const formData = reactive<TripFormState>({
@@ -255,26 +248,18 @@ const handleSubmit = async () => {
   }
 
   loading.value = true
-  loadingProgress.value = 0
-  loadingStatus.value = '正在初始化...'
+  loadingElapsed.value = 0
+  loadingStatus.value = '正在执行多 Agent 检索与规划...'
 
-  // 模拟进度更新
+  // 后端当前是单请求编排，这里只展示等待时间，不伪造阶段百分比。
   const progressInterval = setInterval(() => {
-    if (loadingProgress.value < 90) {
-      loadingProgress.value += 10
-
-      // 更新状态文本
-      if (loadingProgress.value <= 30) {
-        loadingStatus.value = '🔍 正在搜索景点...'
-      } else if (loadingProgress.value <= 50) {
-        loadingStatus.value = '🌤️ 正在查询天气...'
-      } else if (loadingProgress.value <= 70) {
-        loadingStatus.value = '🏨 正在推荐酒店...'
-      } else {
-        loadingStatus.value = '📋 正在生成行程计划...'
-      }
+    loadingElapsed.value += 1
+    if (loadingElapsed.value >= 60) {
+      loadingStatus.value = '正在优化路线并校验约束，复杂行程需要更长时间...'
+    } else if (loadingElapsed.value >= 20) {
+      loadingStatus.value = '正在汇总检索结果并生成行程...'
     }
-  }, 500)
+  }, 1000)
 
   try {
     const requestData: TripFormData = {
@@ -291,7 +276,6 @@ const handleSubmit = async () => {
     const response = await generateTripPlan(requestData)
 
     clearInterval(progressInterval)
-    loadingProgress.value = 100
     loadingStatus.value = '✅ 完成!'
 
     if (response.success && response.data) {
@@ -317,7 +301,7 @@ const handleSubmit = async () => {
   } finally {
     setTimeout(() => {
       loading.value = false
-      loadingProgress.value = 0
+      loadingElapsed.value = 0
       loadingStatus.value = ''
     }, 1000)
   }
@@ -630,6 +614,12 @@ const handleSubmit = async () => {
   color: #667eea;
   font-size: 18px;
   font-weight: 500;
+}
+
+.loading-elapsed {
+  margin: 8px 0 0;
+  color: #8c8c8c;
+  font-size: 14px;
 }
 
 /* 动画 */

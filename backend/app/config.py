@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     # 高德地图API配置
     amap_api_key: str = ""
+    amap_route_timeout_seconds: float = 8.0
 
     # Local Knowledge / Web Search 配置
     tavily_api_key: str = ""
@@ -68,6 +69,12 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+def is_configured_secret(value: Optional[str]) -> bool:
+    """判断密钥是否已配置，并排除 .env.example 中的占位符。"""
+    normalized = (value or "").strip().lower()
+    return bool(normalized) and not normalized.startswith(("your_", "replace_", "changeme"))
+
+
 def get_settings() -> Settings:
     """获取配置实例"""
     return settings
@@ -78,14 +85,14 @@ def validate_config():
     errors = []
     warnings = []
 
-    if not settings.amap_api_key:
-        errors.append("AMAP_API_KEY未配置")
+    if not is_configured_secret(settings.amap_api_key):
+        errors.append("AMAP_API_KEY未配置（请填写高德“Web 服务”Key）")
 
     llm_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not llm_api_key:
         warnings.append("LLM_API_KEY或OPENAI_API_KEY未配置,LLM功能可能无法使用")
 
-    if not settings.tavily_api_key:
+    if not is_configured_secret(settings.tavily_api_key):
         warnings.append("TAVILY_API_KEY未配置,Local Knowledge Agent 将显式降级且不会猜测开放/预约规则")
 
     if errors:
@@ -105,8 +112,8 @@ def print_config():
     print(f"应用名称: {settings.app_name}")
     print(f"版本: {settings.app_version}")
     print(f"服务器: {settings.host}:{settings.port}")
-    print(f"高德地图API Key: {'已配置' if settings.amap_api_key else '未配置'}")
-    print(f"Tavily API Key: {'已配置' if settings.tavily_api_key else '未配置'}")
+    print(f"高德地图 Web 服务 Key: {'已配置' if is_configured_secret(settings.amap_api_key) else '未配置'}")
+    print(f"Tavily API Key: {'已配置' if is_configured_secret(settings.tavily_api_key) else '未配置'}")
 
     llm_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
     llm_base_url = os.getenv("LLM_BASE_URL") or settings.openai_base_url

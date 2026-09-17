@@ -46,6 +46,23 @@ def test_missing_api_key_degrades_without_calling_provider():
     assert "不要猜测" in result.as_agent_context()
 
 
+def test_placeholder_api_key_also_degrades_without_calling_provider():
+    def opener(*args, **kwargs):
+        raise AssertionError("provider should not be called with a placeholder key")
+
+    result = search_local_knowledge(
+        city="北京",
+        attraction_context="故宫",
+        start_date="2026-10-01",
+        end_date="2026-10-03",
+        api_key="your_tavily_api_key_here",
+        opener=opener,
+    )
+
+    assert result.degraded is True
+    assert result.error == "TAVILY_API_KEY not configured"
+
+
 def test_provider_results_are_normalized_into_traceable_sources():
     captured = {}
 

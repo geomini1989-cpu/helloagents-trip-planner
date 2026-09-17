@@ -5,6 +5,7 @@ from app.services.revision_lock_service import enforce_revision_locks, merge_rev
 
 class FakeRouteProvider:
     def __init__(self):
+        self.route_types = []
         self.minutes = {
             ("A", "B"): 60,
             ("B", "C"): 60,
@@ -15,6 +16,7 @@ class FakeRouteProvider:
         }
 
     def plan_route(self, origin_address, destination_address, **kwargs):
+        self.route_types.append(kwargs.get("route_type"))
         minutes = self.minutes[(origin_address, destination_address)]
         return {
             "duration_seconds": minutes * 60,
@@ -39,12 +41,13 @@ def test_gis_optimizer_reorders_by_network_cost():
         _attraction("C", 113.3),
     ]
 
+    provider = FakeRouteProvider()
     optimized, report = optimize_day_attractions(
         attractions,
         day_index=0,
         city="广州",
-        transportation="公共交通",
-        route_provider=FakeRouteProvider(),
+        transportation="步行+公共交通",
+        route_provider=provider,
     )
 
     assert [item.name for item in optimized] == ["A", "C", "B"]
@@ -53,6 +56,7 @@ def test_gis_optimizer_reorders_by_network_cost():
     assert report.after_minutes == 20
     assert report.saved_minutes == 100
     assert report.source_counts["amap_network"] == 6
+    assert set(provider.route_types) == {"transit"}
 
 
 def test_natural_language_revision_locks_are_persistent_rules():

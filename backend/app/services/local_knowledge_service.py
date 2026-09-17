@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from ..config import get_settings
+from ..config import get_settings, is_configured_secret
 
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
@@ -262,7 +262,7 @@ def search_local_knowledge(
         end_date=end_date,
     )
 
-    if not effective_key:
+    if not is_configured_secret(effective_key):
         return LocalKnowledgeResult(
             query=query,
             degraded=True,

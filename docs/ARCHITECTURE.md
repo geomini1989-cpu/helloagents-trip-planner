@@ -9,7 +9,8 @@ The core design principle is:
 ```text
 Coordinator     → understand the task type
 LLM             → semantic planning / revision
-AMap MCP        → POI / weather / hotel / route data
+AMap MCP        → POI / weather / hotel data
+AMap REST       → cached route metrics with bounded timeouts
 Web Search      → source-backed operating information
 Local Knowledge → verify opening / reservation / closure rules
 GIS             → calculate travel cost and visit order
@@ -41,6 +42,9 @@ flowchart TD
     A --> AMAP[AMap MCP]
     W --> AMAP
     H --> AMAP
+
+    GIS --> AR[AMap REST]
+    V --> AR
 
     A --> LK[Local Knowledge Agent]
     LK --> WEB[Independent Web Search]

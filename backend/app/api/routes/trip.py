@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from ...agents.trip_planner_agent import get_trip_planner_agent
 from ...models.schemas import RevisionLocks, TripRequest
@@ -97,6 +98,22 @@ def _execute_existing_session(
     return protected_plan, trace_events, effective_locks, execution_plan.to_dict()
 
 
+def _execute_full_plan(request: TripRequest):
+    """在工作线程中执行同步 Agent / MCP / GIS 流程。"""
+    planner = get_trip_planner_agent()
+    return execute_trip_plan(planner, request)
+
+
+def _execute_new_dispatch(message: str, request: TripRequest):
+    """在工作线程中完成 Coordinator 与完整规划，避免阻塞 FastAPI 事件循环。"""
+    execution_plan = build_execution_plan(message, has_session=False)
+    effective_request = merge_constraints_from_text(
+        _append_message_to_request(request, message)
+    )
+    trip_plan, base_trace = _execute_full_plan(effective_request)
+    return execution_plan, effective_request, trip_plan, base_trace
+
+
 @router.post(
     "/plan",
     response_model=TripResponseWithSession,
@@ -107,8 +124,10 @@ async def plan_trip(request: TripRequest):
     """显式完整规划入口；适合表单式前端。"""
     try:
         effective_request = merge_constraints_from_text(request)
-        planner = get_trip_planner_agent()
-        trip_plan, execution_trace = execute_trip_plan(planner, effective_request)
+        trip_plan, execution_trace = await run_in_threadpool(
+            _execute_full_plan,
+            effective_request,
+        )
 
         plan_dict = _model_dump(trip_plan)
         empty_locks = RevisionLocks()
@@ -144,7 +163,8 @@ async def dispatch_trip_task(request: DispatchRequest):
         if not session:
             raise HTTPException(status_code=404, detail="会话不存在或已失效")
         try:
-            plan, trace, locks, execution_plan = _execute_existing_session(
+            plan, trace, locks, execution_plan = await run_in_threadpool(
+                _execute_existing_session,
                 session=session,
                 feedback=request.message,
                 explicit_locks=request.locks,
@@ -177,12 +197,11 @@ async def dispatch_trip_task(request: DispatchRequest):
         raise HTTPException(status_code=400, detail="新任务需要提供 trip_request；已有计划请提供 session_id")
 
     try:
-        execution_plan = build_execution_plan(request.message, has_session=False)
-        effective_request = merge_constraints_from_text(
-            _append_message_to_request(request.trip_request, request.message)
+        execution_plan, effective_request, trip_plan, base_trace = await run_in_threadpool(
+            _execute_new_dispatch,
+            request.message,
+            request.trip_request,
         )
-        planner = get_trip_planner_agent()
-        trip_plan, base_trace = execute_trip_plan(planner, effective_request)
         trace = [coordinator_trace_event(execution_plan), *base_trace]
         empty_locks = RevisionLocks()
         session_id = create_session(
@@ -217,7 +236,8 @@ async def revise_trip(request: ReviseRequest):
         raise HTTPException(status_code=404, detail="会话不存在或已失效")
 
     try:
-        protected_plan, trace_events, effective_locks, execution_plan = _execute_existing_session(
+        protected_plan, trace_events, effective_locks, execution_plan = await run_in_threadpool(
+            _execute_existing_session,
             session=session,
             feedback=request.feedback,
             explicit_locks=request.locks,
@@ -306,14 +326,10 @@ async def read_execution_trace(session_id: str):
 
 @router.get("/health")
 async def health_check():
-    try:
-        get_trip_planner_agent()
-        return {
-            "status": "healthy",
-            "service": "multi-agent-trip-planner",
-            "persistence": "sqlite",
-            "orchestration": "coordinator + validated-task-graph + fan-out-fan-in-gis-validate-repair",
-            "revision_guard": "persistent-locks",
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"服务不可用: {exc}") from exc
+    return {
+        "status": "healthy",
+        "service": "multi-agent-trip-planner",
+        "persistence": "sqlite",
+        "orchestration": "coordinator + validated-task-graph + fan-out-fan-in-gis-validate-repair",
+        "revision_guard": "persistent-locks",
+    }

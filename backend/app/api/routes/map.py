@@ -1,6 +1,7 @@
 """地图服务API路由"""
 
 from fastapi import APIRouter, HTTPException, Query
+from starlette.concurrency import run_in_threadpool
 from typing import Optional
 from ...models.schemas import (
     POISearchRequest,
@@ -10,6 +11,7 @@ from ...models.schemas import (
     WeatherResponse
 )
 from ...services.amap_service import get_amap_service
+from ...services.route_service import get_route_service
 
 router = APIRouter(prefix="/map", tags=["地图服务"])
 
@@ -41,7 +43,7 @@ async def search_poi(
         service = get_amap_service()
         
         # 搜索POI
-        pois = service.search_poi(keywords, city, citylimit)
+        pois = await run_in_threadpool(service.search_poi, keywords, city, citylimit)
         
         return POISearchResponse(
             success=True,
@@ -80,7 +82,7 @@ async def get_weather(
         service = get_amap_service()
         
         # 查询天气
-        weather_info = service.get_weather(city)
+        weather_info = await run_in_threadpool(service.get_weather, city)
         
         return WeatherResponse(
             success=True,
@@ -114,10 +116,11 @@ async def plan_route(request: RouteRequest):
     """
     try:
         # 获取服务实例
-        service = get_amap_service()
+        service = get_route_service()
         
         # 规划路线
-        route_info = service.plan_route(
+        route_info = await run_in_threadpool(
+            service.plan_route,
             origin_address=request.origin_address,
             destination_address=request.destination_address,
             origin_city=request.origin_city,
@@ -125,10 +128,19 @@ async def plan_route(request: RouteRequest):
             route_type=request.route_type
         )
         
+        distance = float(route_info.get("distance_meters") or 0)
+        duration = int(round(float(route_info.get("duration_seconds") or 0)))
+        route_type = str(route_info.get("route_type") or request.route_type)
+
         return RouteResponse(
             success=True,
             message="路线规划成功",
-            data=route_info
+            data={
+                "distance": distance,
+                "duration": duration,
+                "route_type": route_type,
+                "description": f"高德路线：约 {distance / 1000:.1f} 公里，预计 {max(1, round(duration / 60))} 分钟",
+            },
         )
         
     except Exception as e:
@@ -145,19 +157,10 @@ async def plan_route(request: RouteRequest):
     description="检查地图服务是否正常"
 )
 async def health_check():
-    """健康检查"""
-    try:
-        # 检查服务是否可用
-        service = get_amap_service()
-        
-        return {
-            "status": "healthy",
-            "service": "map-service",
-            "mcp_tools_count": len(service.mcp_tool._available_tools)
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"服务不可用: {str(e)}"
-        )
+    """就绪检查不启动 MCP 子进程，避免健康探针本身阻塞服务。"""
+    return {
+        "status": "healthy",
+        "service": "map-service",
+        "route_provider": "amap-rest-with-haversine-fallback",
+    }
 
