@@ -12,7 +12,12 @@ from typing import Any, Callable, Dict, List, Tuple
 from ..config import get_settings
 from ..models.schemas import TripPlan, TripRequest
 from .gis_optimizer_service import RouteOptimizationReport, optimize_trip_routes
-from .resilience_service import AgentExecutionError, AttemptError, run_with_retry
+from .resilience_service import (
+    AgentExecutionError,
+    AttemptError,
+    ensure_successful_tool_result,
+    run_with_retry,
+)
 from .validation_service import ValidationReport, validate_trip_plan
 
 
@@ -59,8 +64,14 @@ def _run_step(
     started = time.perf_counter()
 
     try:
+        def checked_runner() -> str:
+            result = runner()
+            if tool:
+                ensure_successful_tool_result(result, context=f"{agent_name}/{tool}")
+            return result
+
         result, attempts, retry_errors = run_with_retry(
-            runner,
+            checked_runner,
             max_retries=settings.agent_max_retries,
             backoff_seconds=settings.agent_retry_backoff_seconds,
         )
