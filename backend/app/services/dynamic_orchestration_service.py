@@ -12,7 +12,12 @@ from ..config import get_settings
 from ..models.schemas import RevisionLocks, TripConstraints, TripPlan, TripRequest
 from .coordinator_service import ExecutionPlan
 from .gis_optimizer_service import optimize_trip_routes
-from .resilience_service import AgentExecutionError, AttemptError, run_with_retry
+from .resilience_service import (
+    AgentExecutionError,
+    AttemptError,
+    ensure_successful_tool_result,
+    run_with_retry,
+)
 from .revision_lock_service import enforce_revision_locks
 from .validation_service import validate_trip_plan
 
@@ -101,8 +106,13 @@ def _run_retrieval(
         "retry_errors": [],
     }
     try:
+        def checked_runner() -> Any:
+            result = runner()
+            ensure_successful_tool_result(result, context=f"{agent_name}/{tool}")
+            return result
+
         result, attempts, retry_errors = run_with_retry(
-            runner,
+            checked_runner,
             max_retries=settings.agent_max_retries,
             backoff_seconds=settings.agent_retry_backoff_seconds,
         )
