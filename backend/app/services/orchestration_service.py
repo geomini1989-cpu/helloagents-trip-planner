@@ -12,7 +12,12 @@ from typing import Any, Callable, Dict, List, Tuple
 from ..config import get_settings
 from ..models.schemas import TripPlan, TripRequest
 from .gis_optimizer_service import RouteOptimizationReport, optimize_trip_routes
-from .resilience_service import AgentExecutionError, AttemptError, run_with_retry
+from .resilience_service import (
+    AgentExecutionError,
+    AttemptError,
+    ensure_successful_tool_result,
+    run_with_retry,
+)
 from .validation_service import ValidationReport, validate_trip_plan
 
 
@@ -59,8 +64,14 @@ def _run_step(
     started = time.perf_counter()
 
     try:
+        def checked_runner() -> str:
+            result = runner()
+            if tool:
+                ensure_successful_tool_result(result, context=f"{agent_name}/{tool}")
+            return result
+
         result, attempts, retry_errors = run_with_retry(
-            runner,
+            checked_runner,
             max_retries=settings.agent_max_retries,
             backoff_seconds=settings.agent_retry_backoff_seconds,
         )
@@ -218,7 +229,8 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
     """执行 retrieval fan-out/fan-in → Local Knowledge → Planner → GIS → Validator → optional Repair。
 
     Local Knowledge 依赖 Attraction 候选，因此在第一批并行检索完成后执行。
-    自动修正最多执行一次，避免 Agent 在“生成—检查—重写”之间无限循环。
+    自动修正最多执行两轮：第一轮修复原始冲突，若复检仍有 blocking issue，
+    允许基于最新冲突再修一次；通过硬上限避免无限循环。
     """
     settings = get_settings()
     trace: List[TraceEvent] = []
@@ -386,42 +398,57 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
         final_validation_passed = report.passed
 
         if report.blocking_issues:
-            repair_event: TraceEvent = {
-                "id": str(uuid.uuid4()),
-                "agent": "Repair Agent",
-                "task": "根据 Validator 问题做一次最小范围自动修正",
-                "tool": None,
-                "status": "running",
-                "started_at": _utc_now(),
-                "duration_ms": 0,
-                "attempts": 1,
-                "error": None,
-                "error_category": None,
-            }
-            repair_started = time.perf_counter()
-            try:
-                repaired = planner.repair_trip_plan(
-                    trip_plan,
-                    request,
-                    [issue.to_dict() for issue in report.blocking_issues],
-                )
-                trip_plan = repaired
-                repair_event["status"] = "success"
-                repair_event["result_preview"] = "已依据 Validator 报告完成一次最小修正"
-            except Exception as exc:
-                repair_event["status"] = "failed"
-                repair_event["error"] = str(exc)
-                repair_event["error_category"] = "repair_failed"
-            finally:
-                repair_event["duration_ms"] = round((time.perf_counter() - repair_started) * 1000, 2)
-                repair_event["finished_at"] = _utc_now()
-                trace.append(repair_event)
+            current_report = report
+            max_repair_rounds = 2
 
-            if repair_event["status"] == "success":
+            for repair_round in range(1, max_repair_rounds + 1):
+                repair_event: TraceEvent = {
+                    "id": str(uuid.uuid4()),
+                    "agent": "Repair Agent",
+                    "task": f"根据 Validator 问题执行第 {repair_round} 轮最小范围自动修正",
+                    "tool": None,
+                    "status": "running",
+                    "started_at": _utc_now(),
+                    "duration_ms": 0,
+                    "attempts": 1,
+                    "error": None,
+                    "error_category": None,
+                    "effective": False,
+                    "repair_round": repair_round,
+                }
+                repair_started = time.perf_counter()
+
+                try:
+                    repaired = planner.repair_trip_plan(
+                        trip_plan,
+                        request,
+                        [issue.to_dict() for issue in current_report.blocking_issues],
+                    )
+                    trip_plan = repaired
+                    repair_event["status"] = "success"
+                    repair_event["result_preview"] = (
+                        f"第 {repair_round} 轮 Repair Agent 已依据最新 Validator 问题返回修正结果"
+                    )
+                except Exception as exc:
+                    repair_event["status"] = "failed"
+                    repair_event["error"] = str(exc)
+                    repair_event["error_category"] = "repair_failed"
+                finally:
+                    repair_event["duration_ms"] = round(
+                        (time.perf_counter() - repair_started) * 1000,
+                        2,
+                    )
+                    repair_event["finished_at"] = _utc_now()
+                    trace.append(repair_event)
+
+                if repair_event["status"] != "success":
+                    final_validation_passed = False
+                    break
+
                 trip_plan, post_gis_event = _run_gis_optimization(
                     trip_plan,
                     request,
-                    agent_name="Post-Repair GIS Optimizer",
+                    agent_name=f"Post-Repair GIS Optimizer #{repair_round}",
                 )
                 trace.append(post_gis_event)
 
@@ -430,13 +457,29 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
                 final_report = validate_trip_plan(trip_plan, request, check_routes=True)
                 trace.append(_validation_event(
                     final_report,
-                    agent_name="Post-Repair Validator",
+                    agent_name=f"Post-Repair Validator #{repair_round}",
                     started_at=revalidate_started_at,
                     started=revalidate_started,
                 ))
+
                 final_validation_passed = final_report.passed
-            else:
-                final_validation_passed = False
+                repair_event["effective"] = final_report.passed
+
+                if final_report.passed:
+                    repair_event["result_preview"] = (
+                        f"第 {repair_round} 轮修正已通过 Post-Repair Validator 复检"
+                    )
+                    break
+
+                repair_event["result_preview"] = (
+                    f"第 {repair_round} 轮修正后仍有硬约束冲突"
+                    + (
+                        "；将基于最新 Validator 问题再执行一轮修正"
+                        if repair_round < max_repair_rounds
+                        else "；已达到 Repair 最大轮数"
+                    )
+                )
+                current_report = final_report
 
     degraded = (
         any(item["status"] in {"failed", "fallback"} for item in trace)

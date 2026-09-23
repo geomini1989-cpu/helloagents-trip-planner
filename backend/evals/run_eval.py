@@ -106,11 +106,16 @@ def _budget_consistent(plan: TripPlan) -> bool:
 
 
 def _final_validation_event(trace: List[Dict[str, Any]]) -> Dict[str, Any] | None:
-    for agent_name in ("Post-Repair Validator", "Trip Validator"):
-        events = [item for item in trace if item.get("agent") == agent_name]
-        if events:
-            return events[-1]
-    return None
+    post_repair_events = [
+        item
+        for item in trace
+        if str(item.get("agent") or "").startswith("Post-Repair Validator")
+    ]
+    if post_repair_events:
+        return post_repair_events[-1]
+
+    events = [item for item in trace if item.get("agent") == "Trip Validator"]
+    return events[-1] if events else None
 
 
 def evaluate_case(
@@ -124,7 +129,8 @@ def evaluate_case(
     knowledge_event = next((item for item in trace if item.get("agent") == "Local Knowledge Agent"), None)
     orchestrator_event = next((item for item in trace if item.get("agent") == "Orchestrator"), None)
     validation_event = _final_validation_event(trace)
-    repair_event = next((item for item in trace if item.get("agent") == "Repair Agent"), None)
+    repair_events = [item for item in trace if item.get("agent") == "Repair Agent"]
+    repair_event = repair_events[-1] if repair_events else None
 
     expected_min_attractions = int(case.get("expected_min_attractions", 1))
     require_budget = bool(case.get("require_budget", False))
@@ -170,8 +176,13 @@ def evaluate_case(
         "failed_checks": failed_checks,
         "fallback_used": fallback_used,
         "validation_passed": validation_passed,
-        "repair_triggered": repair_event is not None,
-        "repair_succeeded": repair_event is not None and repair_event.get("status") == "success",
+        "repair_triggered": bool(repair_events),
+        "repair_rounds": len(repair_events),
+        "repair_agent_succeeded": bool(repair_events)
+        and all(item.get("status") == "success" for item in repair_events),
+        "repair_succeeded": bool(repair_events)
+        and any(item.get("effective") is True for item in repair_events)
+        and validation_passed,
         "retrieval_successes": sum(item.get("status") == "success" for item in retrieval_events),
         "retrieval_steps": len(retrieval_events),
         "local_knowledge": {

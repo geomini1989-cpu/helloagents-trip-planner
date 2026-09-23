@@ -1,6 +1,10 @@
 import pytest
 
-from app.services.resilience_service import AgentExecutionError, run_with_retry
+from app.services.resilience_service import (
+    AgentExecutionError,
+    ensure_successful_tool_result,
+    run_with_retry,
+)
 
 
 def test_transient_timeout_retries_then_succeeds():
@@ -73,3 +77,17 @@ def test_planner_can_opt_into_validation_retry():
     assert attempts == 2
     assert len(errors) == 1
     assert errors[0].category == "validation"
+
+
+
+def test_tool_error_text_is_rejected():
+    with pytest.raises(RuntimeError, match="failed"):
+        ensure_successful_tool_result(
+            "抱歉，工具调用失败：未找到工具 'amap_maps_weather'",
+            context="Weather Agent/amap",
+        )
+
+
+def test_normal_tool_text_is_accepted():
+    result = "工具 'maps_weather' 执行结果：北京今天晴，25℃"
+    assert ensure_successful_tool_result(result, context="Weather Agent/amap") == result

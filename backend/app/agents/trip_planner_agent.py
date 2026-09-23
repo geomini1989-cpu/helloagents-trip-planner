@@ -21,23 +21,29 @@ from ..services.resilience_service import run_with_retry
 
 ATTRACTION_AGENT_PROMPT = """你是景点搜索专家。你的任务是根据城市和用户偏好搜索合适的景点。
 
-你必须使用工具搜索景点，不要自己编造景点信息。
-使用 maps_text_search 时严格输出：
-[TOOL_CALL:amap_maps_text_search:keywords=景点关键词,city=城市名]
+你必须使用 amap MCP 网关调用真实工具，不要自己编造景点信息。
+调用 maps_text_search 时严格输出 JSON 参数：
+[TOOL_CALL:amap:{"action":"call_tool","tool_name":"maps_text_search","arguments":{"keywords":"景点关键词","city":"城市名"}}]
+
+如果工具返回错误、工具不存在或调用失败，最终回答必须以 TOOL_ERROR: 开头，不要伪造景点数据。
 """
 
 WEATHER_AGENT_PROMPT = """你是天气查询专家。你的任务是查询指定城市的天气信息。
 
-你必须使用工具查询天气，不要自己编造天气信息。
-使用 maps_weather 时严格输出：
-[TOOL_CALL:amap_maps_weather:city=城市名]
+你必须使用 amap MCP 网关调用真实工具，不要自己编造天气信息。
+调用 maps_weather 时严格输出 JSON 参数：
+[TOOL_CALL:amap:{"action":"call_tool","tool_name":"maps_weather","arguments":{"city":"城市名"}}]
+
+如果工具返回错误、工具不存在或调用失败，最终回答必须以 TOOL_ERROR: 开头，不要伪造天气数据。
 """
 
 HOTEL_AGENT_PROMPT = """你是酒店推荐专家。你的任务是根据城市和住宿偏好搜索合适的酒店。
 
-你必须使用工具搜索酒店，不要自己编造酒店信息。
-使用 maps_text_search 时严格输出：
-[TOOL_CALL:amap_maps_text_search:keywords=酒店,city=城市名]
+你必须使用 amap MCP 网关调用真实工具，不要自己编造酒店信息。
+调用 maps_text_search 时严格输出 JSON 参数：
+[TOOL_CALL:amap:{"action":"call_tool","tool_name":"maps_text_search","arguments":{"keywords":"酒店","city":"城市名"}}]
+
+如果工具返回错误、工具不存在或调用失败，最终回答必须以 TOOL_ERROR: 开头，不要伪造酒店数据。
 """
 
 LOCAL_KNOWLEDGE_AGENT_PROMPT = """你是旅行景点本地知识核验专家。
@@ -170,6 +176,14 @@ VALIDATION_REPAIR_PROMPT = """你是旅行计划修正 Agent。下方行程已�
 你的任务不是重新自由规划，而是以最小改动修复列出的 validation issues，同时保持没有问题的安排不变。
 必须严格遵守结构化约束，只输出完整合法 JSON，不要解释。
 
+修正规则：
+1. 必须真正消除每一条 blocking issue；输出结果还会再次经过 GIS 路线优化和 Validator 复检。
+2. 对 route_leg_too_long，不能只依赖“调整同一天内的访问顺序”来修复，因为 GIS 可能再次重排。
+3. 对 route_leg_too_long，优先在现有景点之间做跨天移动或交换，使违规的 from/to 不再落在同一天形成必经长距离组合；如仍无法满足单段交通上限，可以删除其中一个冲突景点，但不要创造当前 TripPlan 中不存在的新 POI。
+4. 跨天移动或交换后，仍必须满足 max_daily_attractions、max_daily_visit_minutes、max_budget 等全部结构化约束，并尽量保证每天至少保留 1 个景点。
+5. 不要修改与 issue 无关的天气、酒店、餐饮和预算结构；如景点调整影响门票合计，只做必要的预算同步。
+6. 如果 issue 中包含 from、to、route_minutes、day_index，必须显式根据这些字段修正对应日期，不能忽略。
+
 结构化约束：
 {constraints_json}
 
@@ -191,12 +205,14 @@ class MultiAgentTripPlanner:
     def __init__(self):
         settings = get_settings()
         self.llm = get_llm()
+        # 固定使用单一 MCP 网关工具。Windows / 不同 MCP Server 版本下，
+        # 子工具自动发现可能为空；由 Agent 通过 action=call_tool 显式选择 maps_* 子工具。
         self.amap_tool = MCPTool(
             name="amap",
-            description="高德地图服务",
+            description="高德地图 MCP 网关，支持通过 call_tool 调用 POI、天气、酒店和路线子工具",
             server_command=["uvx", "amap-mcp-server"],
             env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-            auto_expand=True,
+            auto_expand=False,
         )
 
     def _create_tool_agent(self, *, name: str, prompt: str) -> SimpleAgent:
@@ -325,9 +341,14 @@ Web Search 候选来源：
 
     def _build_attraction_query(self, request: TripRequest) -> str:
         keywords = request.preferences[0] if request.preferences else "景点"
+        tool_call = {
+            "action": "call_tool",
+            "tool_name": "maps_text_search",
+            "arguments": {"keywords": keywords, "city": request.city},
+        }
         return (
-            f"请使用amap_maps_text_search工具搜索{request.city}的{keywords}相关景点。\n"
-            f"[TOOL_CALL:amap_maps_text_search:keywords={keywords},city={request.city}]"
+            f"请通过 amap MCP 网关搜索{request.city}的{keywords}相关景点。\n"
+            f"[TOOL_CALL:amap:{json.dumps(tool_call, ensure_ascii=False)}]"
         )
 
     def _build_planner_query(
