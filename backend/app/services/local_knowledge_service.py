@@ -16,6 +16,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from ..config import get_settings, is_configured_secret
@@ -32,6 +33,47 @@ _ALLOWED_CLAIM_TYPES = {
     "other",
 }
 _ALLOWED_VERIFICATION_STATUS = {"verified", "unverified", "unsupported"}
+_TRACKING_QUERY_KEYS = {
+    "scm",
+    "spm",
+    "from",
+    "source",
+    "ref",
+    "fbclid",
+    "gclid",
+}
+
+
+def _canonicalize_source_url(url: str) -> str:
+    """Normalize provider/Agent URLs while preserving content-identifying query params.
+
+    Search providers and pages may append or rewrite tracking parameters. These should not
+    turn the same article into an unsupported citation, but meaningful query parameters are
+    retained so distinct resources do not collapse into one URL.
+    """
+    value = (url or "").strip()
+    if not value:
+        return ""
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return value
+
+    scheme = parts.scheme.lower()
+    netloc = parts.netloc.lower()
+    path = parts.path or "/"
+    if path != "/":
+        path = path.rstrip("/")
+
+    filtered_query = []
+    for key, val in parse_qsl(parts.query, keep_blank_values=True):
+        key_lower = key.lower()
+        if key_lower.startswith("utm_") or key_lower in _TRACKING_QUERY_KEYS:
+            continue
+        filtered_query.append((key, val))
+    filtered_query.sort()
+    query = urlencode(filtered_query, doseq=True)
+    return urlunsplit((scheme, netloc, path, query, ""))
 
 
 @dataclass
@@ -177,7 +219,11 @@ def normalize_agent_claims(response: str, result: LocalKnowledgeResult) -> str:
     A claim can only remain ``verified`` when the cited URL is one of the provider
     results. Unknown URLs are marked ``unsupported`` and excluded from planner context.
     """
-    source_by_url = {source.url: source for source in result.sources}
+    source_by_url = {
+        _canonicalize_source_url(source.url): source
+        for source in result.sources
+        if _canonicalize_source_url(source.url)
+    }
     claims: List[LocalKnowledgeClaim] = []
     try:
         payload = _extract_json(response)
@@ -202,7 +248,8 @@ def normalize_agent_claims(response: str, result: LocalKnowledgeResult) -> str:
                 status = "unverified"
 
             source_url = str(raw.get("source_url") or "").strip() or None
-            matched_source = source_by_url.get(source_url or "")
+            canonical_source_url = _canonicalize_source_url(source_url or "")
+            matched_source = source_by_url.get(canonical_source_url)
             if status == "verified" and matched_source is None:
                 status = "unsupported"
             elif status == "unverified":
@@ -215,7 +262,8 @@ def normalize_agent_claims(response: str, result: LocalKnowledgeResult) -> str:
                 claim_type=claim_type,
                 claim=claim,
                 verification_status=status,
-                source_url=source_url,
+                # Store the provider-returned URL when matched so trace/eval use one canonical source.
+                source_url=matched_source.url if matched_source else source_url,
                 source_title=matched_source.title if matched_source else None,
             ))
 
