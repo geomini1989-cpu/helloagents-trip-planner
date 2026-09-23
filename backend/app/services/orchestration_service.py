@@ -408,6 +408,7 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
                 "attempts": 1,
                 "error": None,
                 "error_category": None,
+                "effective": False,
             }
             repair_started = time.perf_counter()
             try:
@@ -446,8 +447,14 @@ def execute_trip_plan(planner: Any, request: TripRequest) -> Tuple[TripPlan, Lis
                     started=revalidate_started,
                 ))
                 final_validation_passed = final_report.passed
+                repair_event["effective"] = final_report.passed
+                if final_report.passed:
+                    repair_event["result_preview"] = "修正已通过 Post-Repair Validator 复检"
+                else:
+                    repair_event["result_preview"] = "Repair Agent 已返回修正结果，但 Post-Repair Validator 仍检测到硬约束冲突"
             else:
                 final_validation_passed = False
+                repair_event["effective"] = False
 
     degraded = (
         any(item["status"] in {"failed", "fallback"} for item in trace)
