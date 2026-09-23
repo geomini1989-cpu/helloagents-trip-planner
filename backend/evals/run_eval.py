@@ -171,7 +171,11 @@ def evaluate_case(
         "fallback_used": fallback_used,
         "validation_passed": validation_passed,
         "repair_triggered": repair_event is not None,
-        "repair_succeeded": repair_event is not None and repair_event.get("status") == "success",
+        "repair_agent_succeeded": repair_event is not None and repair_event.get("status") == "success",
+        "repair_succeeded": repair_event is not None
+        and repair_event.get("status") == "success"
+        and repair_event.get("effective") is True
+        and validation_passed,
         "retrieval_successes": sum(item.get("status") == "success" for item in retrieval_events),
         "retrieval_steps": len(retrieval_events),
         "local_knowledge": {
