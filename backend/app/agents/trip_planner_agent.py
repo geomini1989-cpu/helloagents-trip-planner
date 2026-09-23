@@ -176,6 +176,14 @@ VALIDATION_REPAIR_PROMPT = """你是旅行计划修正 Agent。下方行程已�
 你的任务不是重新自由规划，而是以最小改动修复列出的 validation issues，同时保持没有问题的安排不变。
 必须严格遵守结构化约束，只输出完整合法 JSON，不要解释。
 
+修正规则：
+1. 必须真正消除每一条 blocking issue；输出结果还会再次经过 GIS 路线优化和 Validator 复检。
+2. 对 route_leg_too_long，不能只依赖“调整同一天内的访问顺序”来修复，因为 GIS 可能再次重排。
+3. 对 route_leg_too_long，优先在现有景点之间做跨天移动或交换，使违规的 from/to 不再落在同一天形成必经长距离组合；如仍无法满足单段交通上限，可以删除其中一个冲突景点，但不要创造当前 TripPlan 中不存在的新 POI。
+4. 跨天移动或交换后，仍必须满足 max_daily_attractions、max_daily_visit_minutes、max_budget 等全部结构化约束，并尽量保证每天至少保留 1 个景点。
+5. 不要修改与 issue 无关的天气、酒店、餐饮和预算结构；如景点调整影响门票合计，只做必要的预算同步。
+6. 如果 issue 中包含 from、to、route_minutes、day_index，必须显式根据这些字段修正对应日期，不能忽略。
+
 结构化约束：
 {constraints_json}
 
