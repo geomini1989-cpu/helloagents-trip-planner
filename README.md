@@ -1,39 +1,151 @@
-# Multi-Agent Trip Planner
+# Multi-Agent Trip Planner · AI 旅游规划助手
 
-一个面向真实旅行规划场景的 **Multi-Agent AI Application**。
+基于 **HelloAgents + 高德 MCP + FastAPI + Vue 3** 的多 Agent 旅游规划应用。
 
-项目不是让大模型直接生成旅行文案，而是让 Agent 在 **真实工具、独立 Web 来源、空间数据、硬约束、确定性规则和反馈闭环** 下完成旅行规划。
+根据目的地、日期、预算和偏好生成每日行程，并支持天气调整、酒店替换、景点运营规则查询和路线优化。生成后检查预算、游览时长和交通时间等约束；后续修改支持差异预览，并保护已经确认的日期、酒店和景点。
 
-基于 **HelloAgents + MCP + FastAPI + Vue 3 + AMap GIS**，覆盖动态任务路由、多 Agent 编排、真实工具调用、Local Knowledge 核验、GIS 路线优化、约束校验、自动修正、会话持久化、局部修改保护、Execution Trace 与 Agent Eval。
+**核心设计：按任务选择执行流程 · 多来源检索与引用检查 · GIS 路线优化 · 确定性校验与修改保护 · Execution Trace 与 Agent Eval**
 
-## Why This Project
+## 使用场景
 
-一个旅行计划同时包含三类问题：
+下面是交互示例，用于说明输入方式与执行流程，不代表已经发布的实测结果。
 
-```text
-任务问题：这次用户到底想完整规划、查开放规则、改天气、换酒店，还是只优化路线？
-语义问题：去哪里、怎么玩、用户喜欢什么？
-确定性问题：预算是否超标、路线是否合理、已确认内容能不能被改？
+1. **生成行程**：在规划页填写城市、日期、交通方式和偏好，并补充“预算不超过 3000 元，每天最多 3 个景点，每天游览最多 6 小时”。
+2. **局部修改**：已有行程后提出“第一天和酒店已经确定，不要改，把第三天改轻松一点”。
+3. **确认应用**：查看候选方案与当前行程的差异，再确认应用。预览不会直接覆盖当前行程。
+4. **查看执行过程**：在 Trace 中检查选中的任务图、外部来源、路线优化、校验问题和降级状态。
+
+后续请求可以按任务独立执行：
+
+| 请求示例 | 执行流程 |
+|---|---|
+| “故宫需要预约吗？如果周一闭馆就调整行程” | Local Knowledge → Revision → GIS → Validator |
+| “明天下雨，把第二天改成室内” | Weather → Revision → GIS → Validator |
+| “酒店换便宜一点” | Hotel → Revision → GIS → Validator |
+| “这三个景点怎么排交通时间更少” | GIS → Validator |
+| “第三天轻松一点” | Revision → GIS → Validator |
+
+<!-- 后续补充真实运行的行程页面、修改差异和 Trace 截图；不使用模拟图片作为实际效果。 -->
+
+## 核心能力
+
+| 能力 | 说明 |
+|---|---|
+| 完整规划 | 景点、天气、酒店并行检索，结合景点运营规则生成结构化 TripPlan |
+| 动态路由 | Coordinator 将后续任务映射到预定义执行图，减少与当前请求无关的调用 |
+| 多来源检索 | 高德提供 POI、天气和酒店候选；独立 Web Search 提供运营规则候选来源 |
+| 路线优化 | 对每日已选景点的访问顺序进行搜索，记录优化前后成本与数据来源 |
+| 校验与修正 | 检查行程天数、预算、景点数量、游览时长、重复景点及相邻交通时间；完整规划支持一次自动修正 |
+| 修改保护 | 持久化锁定日期、酒店和景点；明确日期的反馈限定本次修改范围 |
+| 预览与确认 | 修改先生成预览，确认时检查会话版本，避免旧预览覆盖较新的行程 |
+| 可观测与可评估 | Trace 记录路由、来源、重试、校验与降级；Eval 分别衡量路由和完整流程 |
+
+## 快速启动
+
+### 1. 获取项目
+
+以下命令以本分支为例：
+
+```bash
+git clone --branch fix/amap-mcp-eval-validation https://github.com/geomini1989-cpu/helloagents-trip-planner.git
+cd helloagents-trip-planner
 ```
 
-因此本项目没有把所有事情都交给一个 LLM：
+建议使用与当前 CI 一致的 **Python 3.11、Node.js 20**。后端锁定 `hello-agents[protocols]==0.2.9`，以匹配当前 `SimpleAgent + MCPTool` 接口。
 
-```text
-Coordinator    → 判断任务类型并选择能力
-LLM            → 理解偏好、生成/修正计划
-AMap MCP       → 获取真实 POI / 天气 / 酒店 / 路线数据
-Web Search     → 获取开放时间 / 预约 / 闭馆 / 入场规则等来源
-Local Knowledge→ 基于来源核验景点运营规则
-GIS            → 计算空间成本并优化访问顺序
-Validator      → 检查明确可计算的硬约束
-Lock Guard     → 保护用户已经确认的内容
-Trace          → 解释系统执行过程
-Eval           → 衡量系统是否真的工作
+### 2. 启动后端
+
+macOS / Linux：
+
+```bash
+cd backend
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
 ```
 
-## Dynamic Multi-Agent Workflow
+Windows PowerShell：
 
-系统不再让所有请求都走同一条固定链路。
+```powershell
+cd backend
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+```
+
+填写 `backend/.env` 后启动：
+
+```bash
+uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+MCP 网关通过 `uvx amap-mcp-server` 启动。安装后端依赖后，请确认当前虚拟环境中的 `uvx` 可执行；首次启动需要联网获取 MCP Server。
+
+### 3. 启动前端
+
+在仓库根目录打开另一个终端：
+
+```bash
+cd frontend
+npm install
+```
+
+复制环境变量示例：
+
+```bash
+# macOS / Linux
+cp .env.example .env
+```
+
+```powershell
+# Windows PowerShell
+Copy-Item .env.example .env
+```
+
+填写 `frontend/.env` 后启动：
+
+```bash
+npm run dev
+```
+
+通过终端输出的地址访问前端。后端默认运行在 `http://localhost:8000`，前端配置默认使用该地址。
+
+### 配置说明
+
+| 位置 | 配置项 | 用途 |
+|---|---|---|
+| 后端 | `LLM_MODEL_ID` | 模型名称，示例为 `qwen-plus` |
+| 后端 | `LLM_API_KEY` | 模型服务密钥 |
+| 后端 | `LLM_BASE_URL` | 模型服务地址，需与模型和密钥匹配 |
+| 后端 | `AMAP_API_KEY` | 高德 **Web 服务** Key，用于 MCP 检索和路线查询 |
+| 后端 | `TAVILY_API_KEY` | 可选，Local Knowledge 的独立 Web Search 来源 |
+| 前端 | `VITE_API_BASE_URL` | 后端地址 |
+| 前端 | `VITE_AMAP_WEB_JS_KEY` | 高德 **Web 端 JS API** Key，用于地图展示 |
+| 前端 | `VITE_AMAP_SECURITY_JS_CODE` | 与前端 JS API Key 配套的安全密钥 |
+
+**后端高德 Web 服务 Key 与前端 JS API Key 类型不同，请分别配置。**
+
+未配置 `TAVILY_API_KEY` 时，主流程仍可运行，但 Local Knowledge 会显式降级，Planner 不会获得该步骤提供的运营规则事实。可选图片服务、超时、重试和 CORS 配置见 [后端配置示例](backend/.env.example)；地图配置见 [前端配置示例](frontend/.env.example)。
+
+## 为什么这样设计
+
+旅行规划同时包含三类问题：
+
+| 问题 | 示例 | 负责部分 |
+|---|---|---|
+| 任务选择 | 完整规划、查规则、换酒店，还是只调整路线？ | Coordinator |
+| 语义规划 | 去哪些地方、如何匹配用户偏好？ | Planner / Revision 与检索 Agent |
+| 确定性检查 | 是否超预算、交通是否超时、已确认内容是否被修改？ | GIS / Validator / Lock Guard |
+
+LLM 负责理解与生成，代码负责可计算的约束和执行边界。外部检索提供候选数据，Trace 和 Eval 用于检查系统实际执行了什么。
+
+## 系统架构
+
+### 动态任务图
+
+完整规划使用稳定 DAG：Attraction、Weather、Hotel 并行检索；Local Knowledge 依赖景点候选做第二阶段检索与引用检查，再汇总到 Planner。已有 Session 的后续请求由 Coordinator 选择对应执行图。
 
 ```mermaid
 flowchart TD
@@ -51,7 +163,8 @@ flowchart TD
     FULL --> W[Weather Agent]
     FULL --> H[Hotel Agent]
     A --> LK[Local Knowledge Agent]
-    LK --> P[Planner Agent]
+    A --> P[Planner Agent]
+    LK --> P
     W --> P
     H --> P
     P --> GIS[GIS Route Optimizer]
@@ -61,419 +174,155 @@ flowchart TD
     GIS2 --> V2[Revalidate]
 ```
 
-完整规划仍然使用稳定 DAG：Attraction / Weather / Hotel 先并行检索，Local Knowledge 依赖候选景点做第二阶段核验，再 fan-in 到 Planner。已有 Session 的后续任务由 Coordinator 选择更小的执行图。
+Coordinator 可以判断 intent、建议 capability，但执行图由后端白名单定义。未知 capability、任意依赖边或函数名不会被直接执行。路由模型不可用或输出无效时，系统显式使用确定性启发式路由降级。
 
-例如：
+每个请求创建独立 Agent 上下文，避免消息历史跨用户、Session 或 Eval case 混用。
 
-```text
-“故宫需要预约吗？如果周一闭馆就调整行程”
-→ Local Knowledge → Revision → GIS → Validator
+### 多来源检索与引用检查
 
-“明天下雨，把第二天改成室内”
-→ Weather → Revision → GIS → Validator
+不同数据由不同来源提供：
 
-“酒店换便宜一点”
-→ Hotel → Revision → GIS → Validator
+| 来源 | 主要用途 |
+|---|---|
+| AMap MCP | POI、地址、经纬度、天气和酒店候选 |
+| AMap REST | 带超时与缓存的路线成本查询 |
+| Tavily Web Search | 开放时间、预约、闭馆、票务和临时公告的候选来源 |
 
-“这三个景点怎么排最省时间”
-→ GIS → Validator
+Local Knowledge 基于检索来源输出结构化 claim。模型标记为 `verified` 的声明，只有在 `source_url` 与本轮实际检索返回的 URL 完全匹配时，才能保留该状态。
 
-“第三天轻松一点”
-→ Revision → GIS → Validator
-```
+| 状态 | 下游处理 |
+|---|---|
+| `verified` | 作为运营规则上下文传给 Planner / Revision |
+| `unverified` | 仅作为提醒 |
+| `unsupported` | 引用了本轮未返回的来源，保留到 Trace / Eval，并从事实上下文中过滤 |
 
-### Coordinator 不是无限权限 Supervisor
+**URL 匹配验证的是引用来源，不等同于声明内容正确、来源权威或信息仍然有效。** 内容正确性、时效性及冲突来源处理仍需进一步评估。
 
-Coordinator 可以判断 intent，并建议需要哪些 capability，但 **不能直接决定执行任意 Python 函数或工具**。
+缺少 Web Search Key 或 claim JSON 无效时，该步骤显式降级。
 
-例如它可以输出：
+### GIS 与校验修正
 
-```json
-{
-  "intent": "poi_rules_check",
-  "requested_capabilities": ["local_knowledge", "revision", "gis", "validator"],
-  "reason": "用户要求核验景点预约与开放规则"
-}
-```
+Planner 决定景点集合，GIS 优化每日访问顺序。对常见的每日 2–3 个景点，系统枚举候选顺序，基于有向成本矩阵选择交通成本更低的方案，并记录优化前后成本。
 
-后端随后把 intent 转换成预定义、白名单的 canonical graph。LLM 输出中的未知 capability、任意依赖边或函数名不会被直接执行。
+路线优先使用高德数据；不可用时使用 Haversine 坐标估算，并记录 fallback 来源。
 
-设计原则是：
+Validator 检查行程天数、总预算、每日景点数量、游览时长、重复景点、相邻交通时间和路线来源。完整规划发现 blocking issue 时触发一次最小范围 Repair，再执行 GIS 与校验。仍未解决时，结果标记为 `degraded`。
 
-```text
-LLM  → 判断“需要什么能力”
-Code → 决定“允许怎么执行”
-```
+公共交通行程中，短距离公交路线超过单段上限时，Validator 会尝试查询真实步行路线；只有步行路线也满足上限时才通过，并记录 `walking_alternative_segments`。明确要求仅公交或仅地铁时不采用该替代方案。
 
-Coordinator LLM 不可用或输出无效时，会显式退化到 deterministic heuristic router，而不是让整个任务失败。
+### 修改保护与会话持久化
 
-## Highlights
+修改保护包含三层：
 
-### Task-Aware Multi-Agent Orchestration
+- **持久化锁定**：日期、全部酒店和指定景点的锁定状态保存在 Session；Lock Guard 恢复被模型或 GIS 改动的锁定内容，并记录 violation。
+- **修改范围保护**：明确提出“修改第二天”时，将本次目标限制为第二天；其他日期的意外改动会被恢复。全局反馈不会自动限定日期。
+- **预览确认**：候选方案有效期为一小时；确认应用时检查 Session 版本，旧预览与当前状态冲突时拒绝覆盖。
 
-Attraction / Weather / Hotel Agent 在完整规划中并行检索；Attraction 结果随后进入 Local Knowledge Agent 做运营规则核验，再与 Weather / Hotel 一起 fan-in 到 Planner。后续任务则由 Coordinator 根据用户意图选择最小执行图，避免每次都重复调用所有 Agent。
-
-每个请求创建独立 Agent 上下文，避免历史消息跨用户、Session 或 Eval case 污染。
-
-### Local Knowledge Agent
-
-Attraction Agent 和 Local Knowledge Agent 的职责、数据源不同：
-
-```text
-Attraction Agent
-→ AMap MCP
-→ POI / 地址 / 经纬度
-
-Local Knowledge Agent
-→ independent Web Search (Tavily by default)
-→ 开放时间 / 停止入场 / 预约 / 闭馆 / 门票 / 临时公告
-```
-
-Web Search 只负责拿候选来源，Local Knowledge Agent 基于来源输出结构化 claim。后端不会直接相信 Agent 自己声明的“已核验”：只有 `source_url` 与本轮 Web Search 实际返回 URL 完全匹配时，claim 才能继续保持 `verified`。
-
-```text
-verified   → 可作为 Planner / Revision 的运营事实
-unverified → 只能作为提醒
-unsupported→ 引用了本轮不存在的来源，保留到 Trace/Eval，但从事实上下文过滤
-```
-
-这使系统可以确定性统计 source coverage、schema validity 和 unsupported-claim rate，而不是依赖另一个 LLM 判断“有没有幻觉”。未配置 `TAVILY_API_KEY` 或 claim JSON 无效时，该能力会显式 fallback，不会假装核验成功。
-
-### Real MCP Tool Calling
-
-通过高德地图 MCP 获取 POI、天气、酒店和路线信息。工具失败会进入统一错误分类、有限重试和显式 fallback，不伪造成功结果。
-
-Local Knowledge 使用独立 Web Search 数据源，因此不是把同一个高德工具换一个 Prompt 再包装成新 Agent。
-
-### Structured Constraints
-
-支持把明确要求转换成硬约束，例如：
-
-```text
-总预算不超过 2500 元
-每天最多 3 个景点
-每天游览最多 6 小时
-单段交通不要超过 45 分钟
-```
-
-这些约束不仅进入 Prompt，还会被后端 Validator 再次检查。
-
-### GIS Route Optimizer
-
-Planner 决定“去哪些地方”，GIS 层决定“按什么顺序去”。
-
-```text
-POI coordinates
-      ↓
-Directed Cost Matrix
- ├─ AMap route time
- └─ Haversine fallback
-      ↓
-Route Search
-      ↓
-Lower-cost visit order
-```
-
-对常见的每日 2–3 个景点直接枚举候选访问顺序，选择交通总成本更低的方案，并记录优化前后时间与数据来源。
-
-路线类后续请求可以直接进入 `GIS → Validator`，不再调用与问题无关的 Weather / Hotel / Planner。
-
-### Validate → Repair → Revalidate
-
-完整规划时，Validator 当前检查：
-
-- 行程天数
-- 总预算
-- 每日景点数量
-- 每日游览时长
-- 重复景点
-- 相邻景点交通时间
-- 路线数据真实来源 / fallback 状态
-
-存在 blocking issue 时触发一次最小范围 Repair，之后重新进行 GIS 优化与校验。如果仍未解决，结果标记为 degraded，而不是假装完全成功。
-
-对于公共交通行程，若短距离公交路线超过单段上限，Validator 会再查询一次高德真实步行路线；只有步行路线也满足上限时才通过，并在报告中记录 `walking_alternative_segments`。这能避免因公交绕行而启动不必要的 LLM Repair；明确要求仅公交/仅地铁的行程不会使用该替代方案。
-
-### Persistent Revision Locks
-
-支持：
-
-```text
-第一天和酒店已经确定，不要改，把第三天改轻松一点。
-```
-
-锁定状态可以覆盖指定日期、全部酒店和指定景点，并持久化到 Session。
-
-Revision Agent 会先收到锁定要求；随后 Deterministic Lock Guard 再比较修改前后数据。即使模型或 GIS 调整触碰锁定内容，后端也会恢复原值并把 violation 写入 Trace。
-
-当反馈明确写出“把第二天改成去熊猫基地”时，Revision Scope Guard 会把本次目标限定为第二天；其他日期即使被模型或 GIS 意外改动，也会恢复并记录到 Trace。未明确日期的全局反馈不会自动限定修改范围。
-
-前端修改采用“生成预览 → 对比差异 → 确认应用”：预览不会覆盖当前 Session。确认时检查 Session 版本，行程已经变化的旧预览会返回冲突，避免覆盖较新的修改。
-
-### Session-Aware Dynamic Tasks
-
-SQLite 不只保存当前计划，还保存原始 `TripRequest`：
-
-```text
-session_id
-request
-current_plan
-history
-execution_trace
-locks
-version
-created_at
-updated_at
-```
-
-这样后续动态任务仍然能够恢复原始交通方式和预算/强度/路线约束，再执行 Local Knowledge、GIS 与 Validator，而不是在修改阶段丢失上下文。
+SQLite 保存原始 `TripRequest`、当前计划、历史、Trace、锁定状态与版本。后续任务可以恢复原始交通方式、预算、强度和路线约束。
 
 ### Execution Trace
 
-Trace 页面现在同时展示：
+Trace 展示 Coordinator intent、路由来源、选中能力与任务图，以及实际执行节点。还记录检索来源、claim 状态、latency、retry、错误类别、GIS 优化前后结果、校验问题、锁定违规和降级状态。
 
-```text
-Coordinator
-   ↓
-Intent + Router Source + Selected Capabilities
-   ↓
-Selected Task Graph
-   ↓
-Local Knowledge / Agent / GIS / Validator / Lock Guard
-   ↓
-Dynamic Orchestrator
-```
+Session 时间线保留历史；Pipeline 展示最近一次 Coordinator 任务，便于区分首次规划与后续修改。
 
-Local Knowledge 事件会展示 provider、检索来源、结构化 claims，以及 supported / unsupported / unverified 统计。Session 时间线保留完整历史，而 Pipeline 只显示最近一次 Coordinator 任务，避免第一次完整规划与后续动态修改混在一起。
+## 评估与验证
 
-并记录 latency、attempts、retry、error category、route source、GIS before/after、validation issues、lock violations 和 degraded state。
+### 三层验证
 
-### Agent Eval + CI
+| 层级 | 验证对象 | 外部配置 |
+|---|---|---|
+| Offline CI | Python 编译、pytest 单元测试、Vue / TypeScript 构建 | 无需真实服务密钥 |
+| Coordinator Routing Eval | 意图识别与预定义能力图选择 | LLM 配置 |
+| Full Live Agent Eval | 真实检索、规划、GIS、校验与修正 | LLM、高德、Tavily 配置 |
 
-离线 CI 自动执行：
+现有离线 CI 工作流针对 `main` 的 push 和目标为 `main` 的 PR 运行。Live Eval 缺少对应密钥时显式跳过该层，不将 mock 或空跑当作真实结果。
 
-- Python compile
-- pytest unit tests
-- Vue / TypeScript build
+### 关键指标
 
-Coordinator / Local Knowledge 测试会验证：
+| 评估对象 | 指标 |
+|---|---|
+| 路由正确性 | `intent_accuracy`、`capability_exact_match_rate`、`minimal_graph_rate` |
+| 路由冗余与遗漏 | `unnecessary_agent_call_rate`、`missing_capability_rate` |
+| 检索与输出 | `retrieval_agent_success_rate`、`structured_output_success_rate` |
+| Local Knowledge 引用 | `local_knowledge_source_coverage_rate`、`local_knowledge_unsupported_claim_rate` |
+| 约束与修正 | `validation_pass_rate`、`repair_success_rate` |
+| 可靠性与延迟 | `fallback_rate`、`agent_step_retry_rate`、`average_latency_ms`、`p95_latency_ms` |
 
-- LLM 不能注入未知 capability
-- LLM 不能自定义可执行依赖图
-- 新任务必须进入 full_plan
-- Session 中 full_plan 会收敛为 revision
-- Coordinator 输出无效时能进入 deterministic fallback
-- 预约/开放规则请求会选择 `poi_rules_check`
-- 缺失 Web Search key 时 Local Knowledge 明确降级且不请求 provider
-- `verified` claim 必须引用本轮真实检索 URL
-- Agent 编造的来源会被标记为 `unsupported` 并从 Planner 事实上下文过滤
-- Local Knowledge 会真正进入 Revision 动态链路
-- 原始 TripRequest 能随 Session 持久化
+Full Eval 同时检查日期和明确指定景点，并保存逐日景点名称、坐标与 POI ID，便于复查失败案例。POI ID 覆盖率仅反映标识是否存在，不代表运营规则已核实。
 
-项目现在有两套互补 Eval：
+### 运行评估
 
-```text
-Coordinator Routing Eval
-→ intent_accuracy
-→ capability_exact_match_rate
-→ minimal_graph_rate
-→ unnecessary_agent_call_rate
-→ missing_capability_rate
-
-Full Agent Eval
-→ structured_output_success_rate
-→ retrieval_agent_success_rate
-→ local_knowledge_source_coverage_rate
-→ local_knowledge_unsupported_claim_rate
-→ validation_pass_rate
-→ repair_success_rate
-→ fallback / retry / latency
-→ 日期与明确指定景点命中率、POI ID 覆盖率（诊断指标）
-```
-
-Full Agent Eval 报告保存逐日景点名称、坐标和 POI ID，便于复查失败样例。POI ID 覆盖率只反映标识是否存在，不代表景点运营信息已核实。
-
-仓库不预填虚构成绩；只有真实环境跑出的结果才应该用于 README 或简历。
-
-## API
-
-保留原有兼容入口：
-
-```text
-POST /api/trip/plan
-POST /api/trip/revise
-POST /api/trip/preview
-POST /api/trip/preview/{preview_id}/apply
-```
-
-其中 `/trip/revise` 内部已经升级为 Coordinator 动态路由。
-`/trip/preview` 会先运行同一任务图和 Validator，只保存一小时有效的候选方案；`/apply` 才写入历史和当前计划。原有 `/revise` 保留兼容。
-
-新增统一自然语言任务入口：
-
-```text
-POST /api/trip/dispatch
-```
-
-没有 `session_id` 时提供 `trip_request`，进入完整规划；有 `session_id` 时基于已有计划动态选择执行图。
-
-## Tech Stack
-
-**Agent / Backend**
-
-- Python
-- HelloAgents / SimpleAgent
-- MCPTool / Model Context Protocol
-- AMap MCP
-- Tavily Web Search (Local Knowledge source)
-- FastAPI / Pydantic
-- SQLite
-- GIS / Haversine distance
-- exact route permutation search
-- ThreadPoolExecutor
-- pytest
-
-**Frontend**
-
-- Vue 3
-- TypeScript
-- Vue Router
-- Vite
-- Ant Design Vue
-- AMap JavaScript API
-
-## Project Structure
-
-```text
-multi-agent-trip-planner/
-├── backend/
-│   ├── app/
-│   │   ├── agents/
-│   │   ├── api/routes/
-│   │   ├── models/
-│   │   └── services/
-│   │       ├── coordinator_service.py
-│   │       ├── dynamic_orchestration_service.py
-│   │       ├── orchestration_service.py
-│   │       ├── local_knowledge_service.py
-│   │       ├── constraint_service.py
-│   │       ├── gis_optimizer_service.py
-│   │       ├── route_service.py
-│   │       ├── validation_service.py
-│   │       ├── revision_lock_service.py
-│   │       ├── resilience_service.py
-│   │       └── session_service.py
-│   ├── evals/
-│   │   ├── run_eval.py
-│   │   ├── run_routing_eval.py
-│   │   ├── cases.json
-│   │   └── routing_cases.json
-│   └── tests/
-├── frontend/
-│   └── src/views/
-│       ├── Home.vue
-│       ├── Result.vue
-│       └── Trace.vue
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── EVALUATION.md
-│   ├── LOCAL_KNOWLEDGE.md
-│   └── ROADMAP.md
-└── .github/workflows/
-    ├── ci.yml
-    └── live-eval.yml
-```
-
-## Quick Start
-
-### Backend
+从仓库根目录进入后端，并使用已配置的虚拟环境：
 
 ```bash
 cd backend
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
-```
 
-Local Knowledge 需要额外配置：
+# 仅评估 Coordinator
+python -m evals.run_routing_eval
 
-```bash
-TAVILY_API_KEY=your_tavily_api_key_here
-```
-
-未配置时主流程仍可运行，但 Local Knowledge 会被明确标记为 fallback，且 Planner 不会获得伪造的景点运营规则。
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-cp .env.example .env
-npm run dev
-```
-
-## Evaluation
-
-运行完整行程 Eval：
-
-```bash
-cd backend
+# 完整行程评估
 python -m evals.run_eval
-```
 
-只跑前三条：
-
-```bash
+# 先运行前三个完整案例
 python -m evals.run_eval --limit 3
 ```
 
-单独运行 Coordinator Routing Eval：
+评估基础设施已经实现；当前 [Roadmap](docs/ROADMAP.md) 将真实路由与完整流程基线列为下一步重点。README 不预填成绩，发布结果时应附运行日期、模型配置、代码版本、案例数量和报告链接。
 
-```bash
-python -m evals.run_routing_eval
-```
+指标定义、测试范围与报告说明见 [Evaluation & Testing](docs/EVALUATION.md)。
 
-GitHub Actions 中的 `Live Agent Eval` 分成两层：
+## API
 
-```text
-只配置 LLM_API_KEY
-→ 可以运行 Coordinator Routing Eval
+| 接口 | 用途 |
+|---|---|
+| `POST /api/trip/plan` | 完整规划 |
+| `POST /api/trip/dispatch` | 统一任务入口：新请求完整规划，已有 Session 动态路由 |
+| `POST /api/trip/revise` | 兼容修改入口，内部使用 Coordinator 动态路由 |
+| `POST /api/trip/preview` | 执行修改并保存候选预览 |
+| `POST /api/trip/preview/{preview_id}/apply` | 检查版本后应用预览 |
 
-配置 LLM_API_KEY + AMAP_API_KEY + TAVILY_API_KEY
-→ 可以运行完整真实 Agent Eval
-```
+`/dispatch` 没有 `session_id` 时需提供 `trip_request`；有 `session_id` 时基于已有计划选择任务图。
 
-缺少对应密钥时只跳过该层 live eval，不会把 mock/空跑当成真实指标。
+## 技术栈与目录
 
-## Documentation
-
-- [Architecture](docs/ARCHITECTURE.md) — Coordinator、动态 Task Graph、Agent 分工、GIS、Validator、Repair、Locks 与架构取舍
-- [Local Knowledge Agent](docs/LOCAL_KNOWLEDGE.md) — 独立 Web 数据源、来源核验、动态路由与降级策略
-- [Evaluation & Testing](docs/EVALUATION.md) — Routing Eval、Full Live Eval、grounding 指标和结果使用原则
-- [Roadmap](docs/ROADMAP.md) — 当前完成度与后续优先级
-
-## Current Status
-
-核心功能目前形成两层编排：
+| 部分 | 技术 |
+|---|---|
+| Agent / 后端 | Python、HelloAgents / SimpleAgent、MCPTool、FastAPI、Pydantic |
+| 检索与路线 | 高德 MCP、高德 REST、Tavily、Haversine、小规模排列搜索 |
+| 会话与并行 | SQLite、ThreadPoolExecutor |
+| 前端 | Vue 3、TypeScript、Vue Router、Vite、Ant Design Vue、高德 JS API |
+| 测试与评估 | pytest、Routing Eval、Full Agent Eval、GitHub Actions |
 
 ```text
-完整规划：
-User → Parallel Retrieval → Local Knowledge → Planner → GIS → Validator → optional Repair
-
-后续任务：
-User → Coordinator → Validated Task Graph → Selected Capabilities → Revision/GIS/Validator → Session
+helloagents-trip-planner/
+├── backend/
+│   ├── app/
+│   │   ├── agents/       # 检索、规划与修改 Agent
+│   │   ├── api/routes/   # 规划、任务路由、预览与确认
+│   │   ├── models/       # 请求、行程、约束与执行数据
+│   │   └── services/     # 编排、GIS、校验、锁定与持久化
+│   ├── evals/            # 完整流程和路由评估
+│   └── tests/
+├── frontend/
+│   └── src/views/        # Home、Result、Trace
+├── docs/                 # 架构、Local Knowledge、评估、路线图
+└── .github/workflows/    # 离线 CI 与真实服务评估
 ```
 
-Routing Eval、Local Knowledge grounding 指标和完整 Agent Eval 的基础设施已经完成。下一阶段重点不是继续增加 Agent 或评估代码，而是配置真实环境跑出 **Coordinator baseline + full-flow baseline**，再根据真实失败 case 做针对性优化。
+## 当前边界与下一步
 
-## Design Boundary
+- **路线优化范围**：优化每日已选景点的访问顺序；尚未覆盖完整开放时间窗口、酒店起终点和复杂多模式约束。
+- **数据可信度**：坐标 fallback 不能作为实测交通时间；来源 URL 匹配不能证明运营规则正确且最新。
+- **修正次数**：完整规划最多进行一次 Repair，未解决的问题保留在结果与 Trace 中。
+- **部署范围**：当前使用 SQLite，多实例部署需要共享持久化方案。
+- **UI 设计**：当前使用 Typed TripPlan 与确定性 Vue 渲染。动态部分是任务图和业务数据，暂未引入 A2UI。
 
-当前没有引入 A2UI。原因是旅行结果页面结构稳定，动态的是 **执行图和业务数据**，而不是 UI schema；Typed TripPlan + deterministic Vue rendering 更简单、更容易测试。
+下一步优先完成可复现的真实评估基线、失败案例分析，以及带来源和 Trace 的演示截图。详细计划见 [Roadmap](docs/ROADMAP.md)。
 
-如果未来产品演进成通用 Travel Agent Workspace，需要 Agent 在比较表、审批表单、预算编辑器、动态任务面板等不同交互 Surface 间动态选择，再重新评估 A2UI。
+## 详细文档
 
----
-
-**Project focus:** Dynamic Multi-Agent Orchestration · Multi-Source Retrieval · Grounded Local Knowledge · MCP Tool Calling · GIS Optimization · Deterministic Validation · Reliability · Observability · Evaluation
+- [Architecture](docs/ARCHITECTURE.md) — Agent 分工、动态执行图、GIS、Validator、Repair 与设计取舍
+- [Local Knowledge Agent](docs/LOCAL_KNOWLEDGE.md) — Web 来源、结构化声明、引用检查与降级策略
+- [Evaluation & Testing](docs/EVALUATION.md) — 路由与完整流程评估、指标定义与结果使用
+- [Roadmap](docs/ROADMAP.md) — 完成状态、当前边界与后续优先级
