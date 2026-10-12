@@ -178,3 +178,77 @@ def test_invalid_agent_json_becomes_parse_error_with_no_trusted_claims():
     assert result.claim_parse_error
     assert result.claims == []
     assert json.loads(context)["verified_claims"] == []
+
+
+def test_verified_claim_matches_source_when_only_tracking_query_differs():
+    provider_url = (
+        "https://m.sohu.com/a/1071983050_121425761"
+        "?scm=10001.325_13-325_13.0.0-0-0-0-0.5_1334"
+    )
+    agent_url = (
+        "https://m.sohu.com/a/1071983050_121425761"
+        "?scm=10001.325_13-13.0.0-0-0-0-0.5_1334"
+    )
+    result = LocalKnowledgeResult(
+        query="南京 钟山风景区 音乐台",
+        sources=[
+            LocalKnowledgeSource(
+                title="南京钟山风景区最新通告",
+                url=provider_url,
+                content="音乐台开放时间临时调整。",
+                score=0.69,
+            )
+        ],
+    )
+
+    context = normalize_agent_claims(
+        json.dumps({
+            "claims": [
+                {
+                    "attraction": "钟山风景区音乐台",
+                    "claim_type": "opening_hours",
+                    "claim": "演出期间开放时间临时调整。",
+                    "verification_status": "verified",
+                    "source_url": agent_url,
+                }
+            ]
+        }, ensure_ascii=False),
+        result,
+    )
+
+    assert len(result.supported_claims) == 1
+    assert result.unsupported_claims == []
+    assert result.supported_claims[0].source_url == provider_url
+    parsed_context = json.loads(context)
+    assert parsed_context["verified_claims"][0]["source_url"] == provider_url
+
+
+def test_meaningful_query_parameter_difference_stays_unsupported():
+    result = LocalKnowledgeResult(
+        query="example",
+        sources=[
+            LocalKnowledgeSource(
+                title="official item 1",
+                url="https://example.org/article?id=1",
+                content="item one",
+            )
+        ],
+    )
+
+    normalize_agent_claims(
+        json.dumps({
+            "claims": [
+                {
+                    "attraction": "example",
+                    "claim_type": "other",
+                    "claim": "different item",
+                    "verification_status": "verified",
+                    "source_url": "https://example.org/article?id=2",
+                }
+            ]
+        }),
+        result,
+    )
+
+    assert result.supported_claims == []
+    assert len(result.unsupported_claims) == 1

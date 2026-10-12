@@ -12,8 +12,14 @@ from ..config import get_settings
 from ..models.schemas import RevisionLocks, TripConstraints, TripPlan, TripRequest
 from .coordinator_service import ExecutionPlan
 from .gis_optimizer_service import optimize_trip_routes
-from .resilience_service import AgentExecutionError, AttemptError, run_with_retry
+from .resilience_service import (
+    AgentExecutionError,
+    AttemptError,
+    ensure_successful_tool_result,
+    run_with_retry,
+)
 from .revision_lock_service import enforce_revision_locks
+from .revision_scope_service import enforce_revision_scope, targeted_day_indexes
 from .validation_service import validate_trip_plan
 
 
@@ -101,8 +107,13 @@ def _run_retrieval(
         "retry_errors": [],
     }
     try:
+        def checked_runner() -> Any:
+            result = runner()
+            ensure_successful_tool_result(result, context=f"{agent_name}/{tool}")
+            return result
+
         result, attempts, retry_errors = run_with_retry(
-            runner,
+            checked_runner,
             max_retries=settings.agent_max_retries,
             backoff_seconds=settings.agent_retry_backoff_seconds,
         )
@@ -147,6 +158,25 @@ def _lock_event(locks: RevisionLocks, violations: List[Dict[str, Any]], *, stage
     }
 
 
+def _scope_event(targets: set[int], violations: List[Dict[str, Any]], *, stage: str) -> TraceEvent:
+    now = _utc_now()
+    return {
+        "id": str(uuid.uuid4()),
+        "agent": "Revision Scope Guard",
+        "task": f"{stage}后保护未指定的行程日期",
+        "tool": "deterministic_scope_rules",
+        "status": "restored" if violations else "success",
+        "started_at": now,
+        "finished_at": now,
+        "duration_ms": 0,
+        "attempts": 1,
+        "error": None,
+        "target_day_indexes": sorted(targets),
+        "violations": violations,
+        "result_preview": f"本次目标日期：{[index + 1 for index in sorted(targets)]}；恢复 {len(violations)} 天。",
+    }
+
+
 def _attraction_context_from_plan(plan: Dict[str, Any]) -> str:
     """Build compact POI context for rule verification without another AMap retrieval."""
     items: List[str] = []
@@ -174,6 +204,7 @@ def execute_session_task(
     trace: List[TraceEvent] = [coordinator_trace_event(execution_plan)]
     total_started = time.perf_counter()
     original_plan = session["current_plan"]
+    scope_targets = targeted_day_indexes(feedback, original_plan)
     request = request_from_session(session)
     candidate_plan = original_plan
     context_sections: List[str] = []
@@ -274,6 +305,9 @@ def execute_session_task(
 
         candidate_plan, violations = enforce_revision_locks(original_plan, candidate_plan, locks)
         trace.append(_lock_event(locks, violations, stage="Revision"))
+        candidate_plan, scope_violations = enforce_revision_scope(original_plan, candidate_plan, scope_targets)
+        if scope_targets:
+            trace.append(_scope_event(scope_targets, scope_violations, stage="Revision"))
 
     if "gis" in capabilities:
         gis_started_at = _utc_now()
@@ -291,15 +325,22 @@ def execute_session_task(
             "error_category": None,
         }
         try:
-            optimized, report = optimize_trip_routes(TripPlan(**candidate_plan), request)
+            if scope_targets:
+                optimized, report = optimize_trip_routes(
+                    TripPlan(**candidate_plan), request, day_indexes=scope_targets,
+                )
+            else:
+                optimized, report = optimize_trip_routes(TripPlan(**candidate_plan), request)
             optimized_dict = optimized.model_dump() if hasattr(optimized, "model_dump") else optimized.dict()
             optimized_dict, gis_lock_violations = enforce_revision_locks(original_plan, optimized_dict, locks)
-            candidate_plan = optimized_dict
+            candidate_plan, gis_scope_violations = enforce_revision_scope(original_plan, optimized_dict, scope_targets)
             event["status"] = "success"
             event["route_optimization"] = report.to_dict()
             event["result_preview"] = json.dumps(report.to_dict(), ensure_ascii=False)[:700]
             if gis_lock_violations:
                 trace.append(_lock_event(locks, gis_lock_violations, stage="GIS"))
+            if scope_targets:
+                trace.append(_scope_event(scope_targets, gis_scope_violations, stage="GIS"))
         except Exception as exc:
             event["status"] = "failed"
             event["error"] = str(exc)

@@ -287,6 +287,7 @@ def optimize_trip_routes(
     request: TripRequest,
     *,
     route_provider: Optional[RouteProvider] = None,
+    day_indexes: Optional[set[int]] = None,
 ) -> tuple[TripPlan, RouteOptimizationReport]:
     """对 TripPlan 每一天的景点顺序做 GIS / 路网优化，返回新的 TripPlan。"""
     payload = plan.model_dump() if hasattr(plan, "model_dump") else plan.dict()
@@ -294,6 +295,8 @@ def optimize_trip_routes(
     reports: List[DayRouteOptimization] = []
 
     for day in optimized_plan.days:
+        if day_indexes is not None and day.day_index not in day_indexes:
+            continue
         optimized, report = optimize_day_attractions(
             day.attractions,
             day_index=day.day_index,

@@ -14,6 +14,36 @@ from typing import Callable, List, Optional, Set, TypeVar
 
 T = TypeVar("T")
 
+_TOOL_FAILURE_MARKERS = (
+    "tool_error:",
+    "未找到工具",
+    "工具不存在",
+    "工具调用失败",
+    "mcp 操作失败",
+    "异步操作失败",
+    "tool not found",
+    "unknown tool",
+    "no such tool",
+)
+
+
+def ensure_successful_tool_result(result: T, *, context: str = "tool") -> T:
+    """Reject textual tool failures so Eval/Trace cannot report false success.
+
+    Some Agent runtimes return a normal string even when the underlying tool call
+    failed. Treat well-known failure markers and empty output as execution errors,
+    allowing the existing retry/fallback path to handle them consistently.
+    """
+    text = str(result or "").strip()
+    if not text:
+        raise RuntimeError(f"{context} returned empty result")
+
+    normalized = text.lower()
+    marker = next((item for item in _TOOL_FAILURE_MARKERS if item in normalized), None)
+    if marker:
+        raise RuntimeError(f"{context} failed: {text[:500]}")
+    return result
+
 
 @dataclass
 class AttemptError:
