@@ -61,6 +61,7 @@ LOCAL_KNOWLEDGE_AGENT_PROMPT = """你是旅行景点本地知识核验专家。
 3. 信息不足或来源表述不明确时使用 verification_status=unverified，source_url 可以为空。
 4. 不允许根据常识补造开放时间、门票、预约或临时公告。
 5. 只输出完整合法 JSON，不要解释，不要 Markdown。
+6. 最多输出 16 条对行程有实际影响的 claims；每个景点最多 2 条。优先临时关闭、预约、闭馆日与开放时间；来源没有明确支持就省略。
 
 输出结构：
 {
@@ -256,7 +257,7 @@ class MultiAgentTripPlanner:
 旅行日期：{request.start_date} 至 {request.end_date}
 
 候选景点检索上下文：
-{attraction_context[:5000]}
+{attraction_context[:1800]}
 
 Web Search 候选来源：
 {source_context}

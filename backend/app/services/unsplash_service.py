@@ -2,7 +2,7 @@
 
 import requests
 from typing import List, Optional
-from ..config import get_settings
+from ..config import get_settings, is_configured_secret
 
 class UnsplashService:
     """Unsplash图片服务类"""
@@ -11,6 +11,7 @@ class UnsplashService:
         """初始化服务"""
         settings = get_settings()
         self.access_key = settings.unsplash_access_key
+        self.enabled = is_configured_secret(self.access_key)
         self.base_url = "https://api.unsplash.com"
     
     def search_photos(self, query: str, per_page: int = 5) -> List[dict]:
@@ -24,6 +25,8 @@ class UnsplashService:
         Returns:
             图片列表
         """
+        if not self.enabled:
+            return []
         try:
             url = f"{self.base_url}/search/photos"
             params = {

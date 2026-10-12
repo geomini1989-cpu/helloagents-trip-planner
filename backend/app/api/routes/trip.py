@@ -15,9 +15,14 @@ from ...services.constraint_service import merge_constraints_from_text
 from ...services.coordinator_service import build_execution_plan
 from ...services.dynamic_orchestration_service import coordinator_trace_event, execute_session_task
 from ...services.orchestration_service import execute_trip_plan
+from ...services.plan_comparison_service import compare_plans
 from ...services.revision_lock_service import merge_revision_locks
 from ...services.session_service import (
+    StaleSessionError,
+    apply_preview,
+    create_preview,
     create_session,
+    get_preview,
     get_session,
     get_session_trace,
     update_session_locks,
@@ -31,6 +36,16 @@ class ReviseRequest(BaseModel):
     session_id: str
     feedback: str
     locks: Optional[RevisionLocks] = None
+
+
+class PreviewResponse(BaseModel):
+    success: bool
+    preview_id: str
+    session_id: str
+    data: Any
+    comparison: Dict[str, Any]
+    execution_trace: List[Dict[str, Any]]
+    execution_plan: Dict[str, Any]
 
 
 class DispatchRequest(BaseModel):
@@ -114,6 +129,48 @@ def _execute_new_dispatch(message: str, request: TripRequest):
     return execution_plan, effective_request, trip_plan, base_trace
 
 
+@router.post("/preview", response_model=PreviewResponse, summary="预览行程修改")
+async def preview_trip(request: ReviseRequest):
+    session = get_session(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在或已失效")
+    try:
+        plan, trace, locks, execution_plan = await run_in_threadpool(
+            _execute_existing_session, session=session, feedback=request.feedback,
+            explicit_locks=request.locks,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"生成预览失败: {exc}") from exc
+    validator = next((item for item in reversed(trace) if item.get("agent") == "Trip Validator"), None)
+    revision_failed = any(item.get("agent") == "Revision Agent" and item.get("status") == "failed" for item in trace)
+    if revision_failed or not validator or validator.get("validation_report", {}).get("passed") is not True:
+        raise HTTPException(status_code=422, detail="候选行程未通过修改或约束校验，未保存预览")
+    comparison = compare_plans(session["current_plan"], plan)
+    gis_event = next((item for item in reversed(trace) if item.get("agent") == "GIS Route Optimizer"), None)
+    comparison["route_saved_minutes"] = (gis_event or {}).get("route_optimization", {}).get("saved_minutes")
+    preview_id = create_preview(session, request.feedback, plan, trace, _lock_payload(locks), comparison)
+    return PreviewResponse(success=True, preview_id=preview_id, session_id=request.session_id,
+                           data=plan, comparison=comparison, execution_trace=trace,
+                           execution_plan=execution_plan)
+
+
+@router.post("/preview/{preview_id}/apply", response_model=TripResponseWithSession, summary="确认应用预览")
+async def apply_trip_preview(preview_id: str):
+    preview = get_preview(preview_id)
+    if not preview:
+        raise HTTPException(status_code=404, detail="预览不存在或已过期")
+    outcome = apply_preview(preview_id)
+    if outcome == "stale":
+        raise HTTPException(status_code=409, detail="行程已变化，请重新生成预览")
+    if outcome != "applied":
+        raise HTTPException(status_code=404, detail="预览不存在或已过期")
+    return TripResponseWithSession(
+        success=True, message="预览已应用", session_id=preview["session_id"],
+        data=preview["candidate_plan"], execution_trace=preview["execution_trace"],
+        locks=RevisionLocks(**preview["locks"]),
+    )
+
+
 @router.post(
     "/plan",
     response_model=TripResponseWithSession,
@@ -176,6 +233,7 @@ async def dispatch_trip_task(request: DispatchRequest):
                 feedback=request.message,
                 execution_trace=trace,
                 locks=lock_payload,
+                expected_version=session["version"],
             )
             if not updated:
                 raise HTTPException(status_code=404, detail="会话不存在或已失效")
@@ -190,6 +248,8 @@ async def dispatch_trip_task(request: DispatchRequest):
             )
         except HTTPException:
             raise
+        except StaleSessionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"动态任务执行失败: {exc}") from exc
 
@@ -246,13 +306,17 @@ async def revise_trip(request: ReviseRequest):
         raise HTTPException(status_code=500, detail=f"修改失败: {exc}") from exc
 
     lock_payload = _lock_payload(effective_locks)
-    updated = update_session_plan(
-        request.session_id,
-        protected_plan,
-        feedback=request.feedback,
-        execution_trace=trace_events,
-        locks=lock_payload,
-    )
+    try:
+        updated = update_session_plan(
+            request.session_id,
+            protected_plan,
+            feedback=request.feedback,
+            execution_trace=trace_events,
+            locks=lock_payload,
+            expected_version=session["version"],
+        )
+    except StaleSessionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="会话不存在或已失效")
 
@@ -331,5 +395,5 @@ async def health_check():
         "service": "multi-agent-trip-planner",
         "persistence": "sqlite",
         "orchestration": "coordinator + validated-task-graph + fan-out-fan-in-gis-validate-repair",
-        "revision_guard": "persistent-locks",
+        "revision_guard": "persistent-locks + explicit-day-scope",
     }

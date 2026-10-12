@@ -29,6 +29,8 @@ The core Agent workflow is already implemented. The roadmap should focus on proo
 - [x] SQLite session persistence
 - [x] Persistent revision locks
 - [x] Deterministic revision lock guard
+- [x] Explicit-day revision scope guard, including GIS restriction
+- [x] Preview / compare / apply with optimistic session version check
 - [x] Retry/backoff/error classification
 - [x] Request-scoped Agent instances
 - [x] Execution Trace UI
@@ -36,6 +38,7 @@ The core Agent workflow is already implemented. The roadmap should focus on proo
 - [x] Coordinator Routing Eval case set + runner
 - [x] Routing metrics: intent / exact graph / minimal graph / unnecessary Agent calls
 - [x] Local Knowledge grounding metrics: source coverage / schema validity / unsupported claim rate
+- [x] Eval checks for exact trip dates and explicit must-visit attractions; auditable POI snapshots
 - [x] Offline CI
 - [x] Live Eval workflow with independent routing/full-pipeline secret preflight
 
@@ -233,7 +236,7 @@ Login, favorites, social sharing, theme switching, and similar features are not 
 
 ### Multi-plan Comparison
 
-Potential product enhancement, but lower priority than real evaluation and reliability work.
+The current preview compares one candidate with the active itinerary before applying it. Comparing several independently generated candidates remains a possible product enhancement.
 
 ## Definition of "Portfolio Ready"
 

@@ -192,6 +192,8 @@ Lower-cost visit order
 
 存在 blocking issue 时触发一次最小范围 Repair，之后重新进行 GIS 优化与校验。如果仍未解决，结果标记为 degraded，而不是假装完全成功。
 
+对于公共交通行程，若短距离公交路线超过单段上限，Validator 会再查询一次高德真实步行路线；只有步行路线也满足上限时才通过，并在报告中记录 `walking_alternative_segments`。这能避免因公交绕行而启动不必要的 LLM Repair；明确要求仅公交/仅地铁的行程不会使用该替代方案。
+
 ### Persistent Revision Locks
 
 支持：
@@ -204,6 +206,10 @@ Lower-cost visit order
 
 Revision Agent 会先收到锁定要求；随后 Deterministic Lock Guard 再比较修改前后数据。即使模型或 GIS 调整触碰锁定内容，后端也会恢复原值并把 violation 写入 Trace。
 
+当反馈明确写出“把第二天改成去熊猫基地”时，Revision Scope Guard 会把本次目标限定为第二天；其他日期即使被模型或 GIS 意外改动，也会恢复并记录到 Trace。未明确日期的全局反馈不会自动限定修改范围。
+
+前端修改采用“生成预览 → 对比差异 → 确认应用”：预览不会覆盖当前 Session。确认时检查 Session 版本，行程已经变化的旧预览会返回冲突，避免覆盖较新的修改。
+
 ### Session-Aware Dynamic Tasks
 
 SQLite 不只保存当前计划，还保存原始 `TripRequest`：
@@ -215,6 +221,7 @@ current_plan
 history
 execution_trace
 locks
+version
 created_at
 updated_at
 ```
@@ -281,7 +288,10 @@ Full Agent Eval
 → validation_pass_rate
 → repair_success_rate
 → fallback / retry / latency
+→ 日期与明确指定景点命中率、POI ID 覆盖率（诊断指标）
 ```
+
+Full Agent Eval 报告保存逐日景点名称、坐标和 POI ID，便于复查失败样例。POI ID 覆盖率只反映标识是否存在，不代表景点运营信息已核实。
 
 仓库不预填虚构成绩；只有真实环境跑出的结果才应该用于 README 或简历。
 
@@ -292,9 +302,12 @@ Full Agent Eval
 ```text
 POST /api/trip/plan
 POST /api/trip/revise
+POST /api/trip/preview
+POST /api/trip/preview/{preview_id}/apply
 ```
 
 其中 `/trip/revise` 内部已经升级为 Coordinator 动态路由。
+`/trip/preview` 会先运行同一任务图和 Validator，只保存一小时有效的候选方案；`/apply` 才写入历史和当前计划。原有 `/revise` 保留兼容。
 
 新增统一自然语言任务入口：
 

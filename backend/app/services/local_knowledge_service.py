@@ -174,7 +174,7 @@ class LocalKnowledgeResult:
         lines = ["以下是 Web Search 检索到的候选来源。只能引用下列 URL："]
         for index, source in enumerate(self.sources, start=1):
             lines.append(
-                f"[{index}] {source.title}\nURL: {source.url}\n摘要: {source.content[:900]}"
+                f"[{index}] {source.title}\nURL: {source.url}\n摘要: {source.content[:650]}"
             )
         return "\n\n".join(lines)
 

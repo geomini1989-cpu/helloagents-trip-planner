@@ -53,6 +53,7 @@
     "accommodation": "经济型酒店",
     "preferences": ["美食", "自然风光"],
     "free_text_input": "希望包含熊猫基地，并留出轻松吃饭和散步的时间，每天游览最多6小时",
+    "required_attraction_alias_groups": [["熊猫基地", "大熊猫繁育研究基地"]],
     "expected_min_attractions": 2,
     "require_budget": true,
     "require_weather": true

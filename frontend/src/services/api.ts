@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { TripFormData, TripPlanResponse } from '@/types'
+import type { TripFormData, TripPlanResponse, TripPreviewResponse } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -48,6 +48,26 @@ export async function generateTripPlan(formData: TripFormData): Promise<TripPlan
       throw new Error('行程规划超时，请稍后重试或缩短行程天数')
     }
     throw new Error(error.response?.data?.detail || error.message || '生成旅行计划失败')
+  }
+}
+
+export async function previewTripRevision(sessionId: string, feedback: string): Promise<TripPreviewResponse> {
+  try {
+    const response = await apiClient.post<TripPreviewResponse>('/api/trip/preview', {
+      session_id: sessionId, feedback
+    })
+    return response.data
+  } catch (error: any) {
+    throw new Error(error.response?.data?.detail || error.message || '生成预览失败')
+  }
+}
+
+export async function applyTripPreview(previewId: string): Promise<TripPlanResponse> {
+  try {
+    const response = await apiClient.post<TripPlanResponse>(`/api/trip/preview/${previewId}/apply`)
+    return response.data
+  } catch (error: any) {
+    throw new Error(error.response?.data?.detail || error.message || '应用预览失败')
   }
 }
 

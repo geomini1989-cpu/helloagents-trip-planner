@@ -307,27 +307,70 @@
   </div>
   <div v-if="tripPlan && sessionId" class="ai-chat-bar">
       <div class="chat-wrapper">
+        <div v-if="pendingPreview" class="preview-panel">
+          <strong>修改预览 · 当前行程尚未改变</strong>
+          <div v-if="pendingPreview.comparison.changed_days.length === 0">每日行程没有变化</div>
+          <div v-for="day in pendingPreview.comparison.changed_days" :key="day.day_index" class="preview-day">
+            <strong>第 {{ day.day_index + 1 }} 天 · {{ day.date }}</strong>
+            <div>原景点：{{ day.before_attractions.join(' → ') || '无' }}</div>
+            <div>新景点：{{ day.after_attractions.join(' → ') || '无' }}</div>
+            <div v-if="day.hotel_changed || day.meals_changed || day.transportation_changed || day.description_changed">
+              其他变化：{{ [day.hotel_changed && '酒店', day.meals_changed && '餐饮', day.transportation_changed && '交通', day.description_changed && '行程说明'].filter(Boolean).join('、') }}
+            </div>
+          </div>
+          <div v-if="pendingPreview.comparison.budget_delta !== null">
+            预算：¥{{ pendingPreview.comparison.budget_before }} → ¥{{ pendingPreview.comparison.budget_after }}
+            （{{ pendingPreview.comparison.budget_delta >= 0 ? '+' : '' }}{{ pendingPreview.comparison.budget_delta }}）
+          </div>
+          <div v-if="pendingPreview.comparison.route_saved_minutes !== null">
+            路线优化预计节省 {{ pendingPreview.comparison.route_saved_minutes }} 分钟
+          </div>
+          <div v-if="pendingPreview.comparison.weather_changed_dates.length">
+            天气信息更新：{{ pendingPreview.comparison.weather_changed_dates.join('、') }}
+          </div>
+          <div v-if="pendingPreview.comparison.suggestions_changed">总体建议已更新</div>
+          <div class="preview-actions">
+            <a-button @click="showPreviewDetails = true">查看完整候选行程</a-button>
+            <a-button @click="discardPreview">放弃</a-button>
+            <a-button type="primary" :loading="isApplyingPreview" @click="confirmPreview">确认应用</a-button>
+          </div>
+        </div>
         <div class="chat-input-box">
           <span class="chat-icon">✨</span>
           <input 
             v-model="feedback"
             @keyup.enter="handleRevise"
-            :disabled="isRevising"
+            :disabled="isRevising || !!pendingPreview"
             type="text" 
             placeholder="💬 试试输入：'把第2天改成去环球影城'..."
             class="custom-chat-input"
           />
           <button 
             @click="handleRevise"
-            :disabled="isRevising || !feedback"
+            :disabled="isRevising || !!pendingPreview || !feedback.trim()"
             class="send-btn"
             :class="{ 'loading': isRevising }"
           >
-            {{ isRevising ? '思考中...' : '调整行程' }}
+            {{ isRevising ? '生成预览中...' : '预览调整' }}
           </button>
         </div>
       </div>
     </div>
+  <a-modal v-model:open="showPreviewDetails" title="候选行程详情" :footer="null" width="760px">
+    <template v-if="pendingPreview">
+      <p>这份候选行程尚未应用。确认后才会替换当前行程。</p>
+      <div v-for="day in pendingPreview.data.days" :key="day.day_index" class="preview-detail-day">
+        <strong>第 {{ day.day_index + 1 }} 天 · {{ day.date }}</strong>
+        <p>{{ day.description }}</p>
+        <p>景点：{{ day.attractions.map(item => item.name).join(' → ') || '无' }}</p>
+        <p>餐饮：{{ day.meals.map(item => item.name).join('、') || '无' }}</p>
+        <p>交通：{{ day.transportation }}</p>
+        <p>住宿：{{ day.hotel?.name || day.accommodation }}</p>
+      </div>
+      <p v-if="pendingPreview.data.budget">预计总预算：¥{{ pendingPreview.data.budget.total }}</p>
+      <p>总体建议：{{ pendingPreview.data.overall_suggestions }}</p>
+    </template>
+  </a-modal>
 </template>
 
 <script setup lang="ts">
@@ -338,7 +381,8 @@ import { DownOutlined } from '@ant-design/icons-vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
-import type { TripPlan } from '@/types'
+import type { TripPlan, TripPreviewResponse } from '@/types'
+import { applyTripPreview, previewTripRevision } from '@/services/api'
 
 
 const router = useRouter()
@@ -352,6 +396,9 @@ let map: any = null
 const sessionId = ref('')     // 会话 ID
 const feedback = ref('')      // 用户反馈输入
 const isRevising = ref(false) // 修改加载状态
+const isApplyingPreview = ref(false)
+const pendingPreview = ref<TripPreviewResponse | null>(null)
+const showPreviewDetails = ref(false)
 
 onMounted(async () => {
   // 优先从 router state 获取 (最新生成的)
@@ -378,57 +425,55 @@ onMounted(async () => {
 
   // 初始化逻辑 (加载图片、地图)
   if (tripPlan.value) {
-    await loadAttractionPhotos()
     await nextTick()
     initMap()
+    void loadAttractionPhotos()
   }
 })
 
 const handleRevise = async () => {
-  if (!feedback.value.trim() || !sessionId.value) return
+  if (!feedback.value.trim() || !sessionId.value || pendingPreview.value) return
   
   isRevising.value = true
   const hideLoading = message.loading('AI 正在重新规划行程...', 0)
   
   try {
-    // 调用后端修改接口
-    const res = await fetch('http://localhost:8000/api/trip/revise', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id: sessionId.value,
-        feedback: feedback.value
-      })
-    })
-    
-    const data = await res.json()
-    
-    if (data.data || data.plan) {
-      const newPlan = data.data || data.plan
-      
-      // 更新当前数据
-      tripPlan.value = newPlan
-      
-      // 更新缓存
-      sessionStorage.setItem('tripPlan', JSON.stringify(newPlan))
-      
-      feedback.value = '' // 清空输入框
-      message.success('行程已更新！')
-      
-      // 重新加载地图和图片
-      if (map) map.destroy()
-      await loadAttractionPhotos()
-      await nextTick()
-      initMap()
-    } else {
-      throw new Error('返回数据格式错误')
-    }
+    pendingPreview.value = await previewTripRevision(sessionId.value, feedback.value.trim())
+    message.success('预览已生成，请检查差异')
   } catch (error) {
     console.error(error)
-    message.error('修改失败，请稍后重试')
+    message.error(error instanceof Error ? error.message : '生成预览失败')
   } finally {
     hideLoading()
     isRevising.value = false
+  }
+}
+
+const discardPreview = () => {
+  pendingPreview.value = null
+  showPreviewDetails.value = false
+}
+
+const confirmPreview = async () => {
+  if (!pendingPreview.value) return
+  isApplyingPreview.value = true
+  try {
+    const result = await applyTripPreview(pendingPreview.value.preview_id)
+    if (!result.data) throw new Error('返回数据缺少行程')
+    tripPlan.value = result.data
+    sessionStorage.setItem('tripPlan', JSON.stringify(result.data))
+    feedback.value = ''
+    discardPreview()
+    message.success('行程已更新')
+    if (map) map.destroy()
+    await nextTick()
+    initMap()
+    void loadAttractionPhotos()
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '应用预览失败')
+    discardPreview()
+  } finally {
+    isApplyingPreview.value = false
   }
 }
 
@@ -1094,6 +1139,30 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
 .chat-wrapper {
   max-width: 800px;
   margin: 0 auto;
+}
+
+.preview-panel {
+  max-height: 42vh;
+  overflow-y: auto;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  background: #fff;
+  border: 1px solid #d8e2ff;
+  border-radius: 12px;
+  line-height: 1.7;
+}
+
+.preview-day, .preview-detail-day {
+  padding: 8px 0;
+  border-bottom: 1px solid #eee;
+}
+
+.preview-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
 }
 
 /* 4. 输入框外观 */

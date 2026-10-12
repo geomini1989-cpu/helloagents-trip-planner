@@ -40,6 +40,7 @@ class ValidationReport:
     issues: List[ValidationIssue]
     checked_route_segments: int = 0
     route_source_counts: Dict[str, int] = field(default_factory=dict)
+    walking_alternative_segments: int = 0
 
     @property
     def blocking_issues(self) -> List[ValidationIssue]:
@@ -52,6 +53,7 @@ class ValidationReport:
             "issues": [issue.to_dict() for issue in self.issues],
             "checked_route_segments": self.checked_route_segments,
             "route_source_counts": self.route_source_counts,
+            "walking_alternative_segments": self.walking_alternative_segments,
         }
 
 
@@ -87,6 +89,7 @@ def validate_trip_plan(plan: TripPlan, request: TripRequest, *, check_routes: bo
     issues: List[ValidationIssue] = []
     checked_route_segments = 0
     route_source_counts: Dict[str, int] = {}
+    walking_alternative_segments = 0
     constraints = request.constraints
 
     if len(plan.days) != request.travel_days:
@@ -183,6 +186,40 @@ def validate_trip_plan(plan: TripPlan, request: TripRequest, *, check_routes: bo
             if route_minutes is None:
                 route_minutes = _estimate_minutes(straight_km, route_type)
 
+            # 公交/地铁包含接驳步行。短距离路段若公交绕行超限，
+            # 仅在高德真实步行路线证明可行时采用步行方案，不用直线距离猜测。
+            walking_allowed = not any(
+                phrase in request.transportation for phrase in ("仅公交", "只坐公交", "仅地铁", "只坐地铁", "禁止步行", "不步行", "不走路")
+            )
+            if (
+                route_type == "transit"
+                and walking_allowed
+                and route_minutes > constraints.max_route_minutes
+                and straight_km <= 5
+                and route_service is not None
+            ):
+                try:
+                    walking = route_service.plan_route(
+                        left.address or left.name,
+                        right.address or right.name,
+                        origin_city=request.city,
+                        destination_city=request.city,
+                        route_type="walking",
+                        origin_location=left.location,
+                        destination_location=right.location,
+                    )
+                    walking_seconds = walking.get("duration_seconds")
+                    if walking_seconds is not None:
+                        walking_minutes = max(1, round(float(walking_seconds) / 60))
+                        if walking_minutes <= constraints.max_route_minutes:
+                            route_minutes = walking_minutes
+                            if walking.get("distance_meters") is not None:
+                                distance_km = round(float(walking["distance_meters"]) / 1000, 2)
+                            source = "amap_walking_alternative"
+                            walking_alternative_segments += 1
+                except Exception:
+                    pass
+
             route_source_counts[source] = route_source_counts.get(source, 0) + 1
             if route_minutes > constraints.max_route_minutes:
                 issues.append(ValidationIssue(
@@ -216,4 +253,5 @@ def validate_trip_plan(plan: TripPlan, request: TripRequest, *, check_routes: bo
         issues=issues,
         checked_route_segments=checked_route_segments,
         route_source_counts=route_source_counts,
+        walking_alternative_segments=walking_alternative_segments,
     )

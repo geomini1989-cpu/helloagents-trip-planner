@@ -105,6 +105,26 @@ def _budget_consistent(plan: TripPlan) -> bool:
     ) >= 0
 
 
+def _required_attractions_present(case: Dict[str, Any], plan: TripPlan) -> bool:
+    names = [attraction.name.casefold() for day in plan.days for attraction in day.attractions]
+    return all(
+        any(alias.casefold() in name for alias in aliases for name in names)
+        for aliases in case.get("required_attraction_alias_groups", [])
+    )
+
+
+def _plan_audit_snapshot(plan: TripPlan) -> List[Dict[str, Any]]:
+    return [
+        {"day_index": day.day_index, "date": day.date,
+         "attractions": [
+             {"name": item.name, "poi_id": item.poi_id,
+              "longitude": item.location.longitude, "latitude": item.location.latitude}
+             for item in day.attractions
+         ]}
+        for day in plan.days
+    ]
+
+
 def _final_validation_event(trace: List[Dict[str, Any]]) -> Dict[str, Any] | None:
     post_repair_events = [
         item
@@ -144,15 +164,26 @@ def evaluate_case(
     unsupported_claims = int(knowledge_metrics.get("unsupported_claims", 0) or 0)
     claim_parse_error = knowledge_metrics.get("claim_parse_error")
     fallback_used = any(item.get("status") == "fallback" for item in trace)
+    expected_dates = [
+        (date.fromisoformat(request.start_date) + timedelta(days=index)).isoformat()
+        for index in range(request.travel_days)
+    ]
+    audit_snapshot = _plan_audit_snapshot(plan)
 
     checks = {
         "city_matches_request": plan.city == request.city,
         "day_count_matches_request": len(plan.days) == request.travel_days,
         "day_indexes_are_sequential": [day.day_index for day in plan.days] == list(range(request.travel_days)),
+        "dates_match_request": plan.start_date == request.start_date
+        and plan.end_date == request.end_date
+        and [day.date for day in plan.days] == expected_dates,
+        "required_attractions_present": _required_attractions_present(case, plan),
         "minimum_attractions_per_day": all(len(day.attractions) >= expected_min_attractions for day in plan.days),
         "breakfast_lunch_dinner_present": _all_days_have_meals(plan),
         "coordinates_are_valid": _all_coordinates_valid(plan),
         "weather_coverage": (not require_weather) or len(plan.weather_info) >= request.travel_days,
+        "weather_dates_match_request": (not require_weather)
+        or set(expected_dates).issubset({item.date for item in plan.weather_info}),
         "budget_present": (not require_budget) or plan.budget is not None,
         "budget_is_consistent": (not require_budget) or _budget_consistent(plan),
         "all_retrieval_agents_succeeded": len(retrieval_events) == 3
@@ -206,6 +237,11 @@ def evaluate_case(
             "weather_days": len(plan.weather_info),
             "budget_total": plan.budget.total if plan.budget else None,
         },
+        "plan_audit": audit_snapshot,
+        "poi_id_coverage": _percentage(
+            sum(bool(item["poi_id"]) for day in audit_snapshot for item in day["attractions"]),
+            sum(len(day["attractions"]) for day in audit_snapshot),
+        ),
     }
 
 
@@ -239,6 +275,7 @@ def aggregate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     supported_claims = sum(item["supported_claims"] for item in knowledge_cases)
     unsupported_claims = sum(item["unsupported_claims"] for item in knowledge_cases)
     unverified_claims = sum(item["unverified_claims"] for item in knowledge_cases)
+    poi_items = [item for result in results for day in result["plan_audit"] for item in day["attractions"]]
 
     error_categories: Counter[str] = Counter()
     for result in results:
@@ -270,6 +307,7 @@ def aggregate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             "unsupported": unsupported_claims,
             "unverified": unverified_claims,
         },
+        "poi_id_coverage_rate": _percentage(sum(bool(item["poi_id"]) for item in poi_items), len(poi_items)),
         "validation_pass_rate": _percentage(validation_passes, total_cases),
         "repair_trigger_rate": _percentage(repair_cases, total_cases),
         "repair_success_rate": _percentage(repair_successes, repair_cases),
@@ -293,6 +331,7 @@ def print_summary(metrics: Dict[str, Any], results: List[Dict[str, Any]]) -> Non
     print(f"Local Knowledge schema valid:      {metrics['local_knowledge_schema_valid_rate']:.2%}")
     print(f"Local Knowledge supported claims:  {metrics['local_knowledge_supported_claim_rate']:.2%}")
     print(f"Local Knowledge unsupported claims:{metrics['local_knowledge_unsupported_claim_rate']:.2%}")
+    print(f"POI ID coverage (diagnostic):      {metrics['poi_id_coverage_rate']:.2%}")
     print(f"Validation pass rate:              {metrics['validation_pass_rate']:.2%}")
     print(f"Repair trigger rate:               {metrics['repair_trigger_rate']:.2%}")
     print(f"Repair success rate:               {metrics['repair_success_rate']:.2%}")
@@ -364,7 +403,7 @@ def main() -> int:
 
     metrics = aggregate_results(results)
     report = {
-        "evaluation": "multi-agent-trip-planner-deterministic-v3",
+        "evaluation": "multi-agent-trip-planner-deterministic-v4",
         "metrics": metrics,
         "results": results,
     }

@@ -122,6 +122,7 @@ export interface ValidationReport {
   issues: ValidationIssue[]
   checked_route_segments: number
   route_source_counts: Record<string, number>
+  walking_alternative_segments?: number
 }
 
 export interface DayRouteOptimization {
@@ -230,4 +231,35 @@ export interface TripPlanResponse {
   execution_trace?: ExecutionTraceEvent[]
   locks?: RevisionLocks
   execution_plan?: ExecutionPlan
+}
+
+export interface DayComparison {
+  day_index: number
+  date: string
+  before_attractions: string[]
+  after_attractions: string[]
+  hotel_changed: boolean
+  meals_changed: boolean
+  transportation_changed: boolean
+  description_changed: boolean
+}
+
+export interface PlanComparison {
+  changed_days: DayComparison[]
+  weather_changed_dates: string[]
+  budget_before: number | null
+  budget_after: number | null
+  budget_delta: number | null
+  suggestions_changed: boolean
+  route_saved_minutes: number | null
+}
+
+export interface TripPreviewResponse {
+  success: boolean
+  preview_id: string
+  session_id: string
+  data: TripPlan
+  comparison: PlanComparison
+  execution_trace: ExecutionTraceEvent[]
+  execution_plan: ExecutionPlan
 }
