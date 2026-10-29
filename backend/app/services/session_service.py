@@ -76,6 +76,9 @@ def _init_db() -> None:
                 expires_at TEXT NOT NULL
             )"""
         )
+        preview_columns = {row["name"] for row in conn.execute("PRAGMA table_info(trip_previews)")}
+        if "request" not in preview_columns:
+            conn.execute("ALTER TABLE trip_previews ADD COLUMN request TEXT")
         conn.commit()
 
 
@@ -148,6 +151,7 @@ def update_session_plan(
     execution_trace: Optional[List[Dict[str, Any]]] = None,
     locks: Optional[Dict[str, Any]] = None,
     expected_version: Optional[int] = None,
+    request: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """更新当前计划，把旧版本写入 history，并可同步 revision locks。"""
     with _connect() as conn:
@@ -172,7 +176,7 @@ def update_session_plan(
         conn.execute(
             """
             UPDATE trip_sessions
-            SET current_plan = ?, history = ?, execution_trace = ?, locks = ?, updated_at = ?, version = version + 1
+            SET current_plan = ?, history = ?, execution_trace = ?, locks = ?, request = COALESCE(?, request), updated_at = ?, version = version + 1
             WHERE session_id = ?
             """,
             (
@@ -180,6 +184,7 @@ def update_session_plan(
                 json.dumps(history, ensure_ascii=False),
                 json.dumps(merged_trace, ensure_ascii=False),
                 json.dumps(persisted_locks, ensure_ascii=False),
+                json.dumps(request, ensure_ascii=False) if request is not None else None,
                 now,
                 session_id,
             ),
@@ -205,6 +210,7 @@ def get_session_trace(session_id: str) -> Optional[List[Dict[str, Any]]]:
 def create_preview(
     session: Dict[str, Any], feedback: str, candidate_plan: Dict[str, Any],
     execution_trace: List[Dict[str, Any]], locks: Dict[str, Any], comparison: Dict[str, Any],
+    request: Optional[Dict[str, Any]] = None,
 ) -> str:
     preview_id = str(uuid.uuid4())
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
@@ -212,13 +218,14 @@ def create_preview(
         conn.execute("DELETE FROM trip_previews WHERE expires_at < ?", (_utc_now(),))
         conn.execute(
             """INSERT INTO trip_previews
-            (preview_id, session_id, base_version, feedback, candidate_plan, execution_trace, locks, comparison, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (preview_id, session_id, base_version, feedback, candidate_plan, execution_trace, locks, comparison, expires_at, request)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (preview_id, session["session_id"], session["version"], feedback,
              json.dumps(candidate_plan, ensure_ascii=False),
              json.dumps(execution_trace, ensure_ascii=False),
              json.dumps(locks, ensure_ascii=False),
-             json.dumps(comparison, ensure_ascii=False), expires_at),
+             json.dumps(comparison, ensure_ascii=False), expires_at,
+             json.dumps(request if request is not None else session.get("request", {}), ensure_ascii=False)),
         )
     return preview_id
 
@@ -235,6 +242,7 @@ def get_preview(preview_id: str) -> Optional[Dict[str, Any]]:
         "execution_trace": json.loads(row["execution_trace"]),
         "locks": json.loads(row["locks"]), "comparison": json.loads(row["comparison"]),
         "expires_at": row["expires_at"],
+        "request": json.loads(row["request"]) if row["request"] else None,
     }
 
 
@@ -264,9 +272,9 @@ def apply_preview(preview_id: str) -> str:
         trace = [*json.loads(session["execution_trace"]), *json.loads(preview["execution_trace"])]
         conn.execute(
             """UPDATE trip_sessions SET current_plan = ?, history = ?, execution_trace = ?,
-            locks = ?, updated_at = ?, version = version + 1 WHERE session_id = ?""",
+            locks = ?, request = COALESCE(?, request), updated_at = ?, version = version + 1 WHERE session_id = ?""",
             (preview["candidate_plan"], json.dumps(history, ensure_ascii=False),
-             json.dumps(trace, ensure_ascii=False), preview["locks"], now, preview["session_id"]),
+             json.dumps(trace, ensure_ascii=False), preview["locks"], preview["request"], now, preview["session_id"]),
         )
         conn.execute("DELETE FROM trip_previews WHERE preview_id = ?", (preview_id,))
     return "applied"

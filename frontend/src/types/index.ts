@@ -224,6 +224,7 @@ export interface ExecutionTraceEvent {
 }
 
 export interface TripPlanResponse {
+  version?: number
   success: boolean
   message: string
   session_id?: string

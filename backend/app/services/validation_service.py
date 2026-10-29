@@ -99,6 +99,16 @@ def validate_trip_plan(plan: TripPlan, request: TripRequest, *, check_routes: bo
             message=f"计划包含 {len(plan.days)} 天，但请求要求 {request.travel_days} 天。",
         ))
 
+    if plan.budget is not None:
+        parts = [plan.budget.total_attractions, plan.budget.total_hotels,
+                 plan.budget.total_meals, plan.budget.total_transportation]
+        if any(value < 0 for value in [*parts, plan.budget.total]) or sum(parts) != plan.budget.total:
+            issues.append(ValidationIssue(
+                code="budget_inconsistent", severity="error",
+                message="预算总额必须等于非负费用分项之和。",
+                details={"reported": plan.budget.total, "computed": sum(parts)},
+            ))
+
     if constraints.max_budget is not None:
         if plan.budget is None:
             issues.append(ValidationIssue(
@@ -106,7 +116,7 @@ def validate_trip_plan(plan: TripPlan, request: TripRequest, *, check_routes: bo
                 severity="error",
                 message="用户设置了预算上限，但计划没有生成预算。",
             ))
-        elif plan.budget.total > constraints.max_budget:
+        elif max(plan.budget.total, sum(parts)) > constraints.max_budget:
             issues.append(ValidationIssue(
                 code="budget_exceeded",
                 severity="error",

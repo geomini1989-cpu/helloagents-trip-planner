@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .budget_service import adjust_budget_for_edits
+
 import copy
 import re
 from typing import Any, Dict, List, Optional, Set
@@ -91,4 +93,4 @@ def enforce_revision_scope(
     protected["city"] = original_plan.get("city")
     protected["start_date"] = original_plan.get("start_date")
     protected["end_date"] = original_plan.get("end_date")
-    return protected, violations
+    return adjust_budget_for_edits(revised_plan, protected), violations

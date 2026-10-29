@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Tuple
 from ..config import get_settings
 from ..models.schemas import RevisionLocks, TripConstraints, TripPlan, TripRequest
 from .coordinator_service import ExecutionPlan
+from .constraint_service import merge_constraints_from_text
 from .gis_optimizer_service import optimize_trip_routes
 from .resilience_service import (
     AgentExecutionError,
@@ -81,6 +82,13 @@ def request_from_session(session: Dict[str, Any]) -> TripRequest:
         free_text_input="",
         constraints=TripConstraints(),
     )
+
+
+def request_for_revision(session: Dict[str, Any], feedback: str) -> TripRequest:
+    current = request_from_session(session)
+    effective = merge_constraints_from_text(current.model_copy(update={"free_text_input": feedback}))
+    history = "；".join(part for part in [current.free_text_input or "", feedback.strip()] if part)
+    return effective.model_copy(update={"free_text_input": history})
 
 
 def _run_retrieval(
@@ -205,7 +213,7 @@ def execute_session_task(
     total_started = time.perf_counter()
     original_plan = session["current_plan"]
     scope_targets = targeted_day_indexes(feedback, original_plan)
-    request = request_from_session(session)
+    request = request_for_revision(session, feedback)
     candidate_plan = original_plan
     context_sections: List[str] = []
 
@@ -274,7 +282,9 @@ def execute_session_task(
     if "revision" in capabilities:
         revision_started_at = _utc_now()
         revision_started = time.perf_counter()
-        enriched_feedback = feedback
+        enriched_feedback = feedback + "\n本轮必须满足的结构化约束：\n" + json.dumps(
+            request.constraints.model_dump(), ensure_ascii=False
+        )
         if context_sections:
             enriched_feedback += "\n\n以下是 Coordinator 根据任务动态获取的实时上下文，请据此修改：\n" + "\n\n".join(context_sections)
         event: TraceEvent = {

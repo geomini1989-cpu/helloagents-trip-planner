@@ -6,6 +6,8 @@ Revision Agent 可以理解“第一天和酒店不要改”这类自然语言�
 
 from __future__ import annotations
 
+from .budget_service import adjust_budget_for_edits
+
 import copy
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -52,24 +54,33 @@ def _normalise(locks: RevisionLocks) -> RevisionLocks:
 def _apply_day_lock_phrases(days: set[int], text: str) -> None:
     """按每个“第X天”附近的语义判断，避免整句关键词污染其他日期。"""
     pattern = re.compile(r"第\s*([0-9一二三四五六七八九十]{1,3})\s*天")
-    for match in pattern.finditer(text):
-        value = _parse_day_number(match.group(1))
-        if value is None:
-            continue
-        day_index = value - 1
-        before = text[max(0, match.start() - 12):match.start()]
-        after = text[match.end():min(len(text), match.end() + 16)]
-
-        prefix_unlock = re.search(r"(?:取消锁定|解除锁定|允许修改|可以修改|可以改)\s*$", before)
-        suffix_unlock = re.search(r"^.{0,4}(?:取消锁定|解除锁定|允许修改|可以修改|可以改)", after)
-        if prefix_unlock or suffix_unlock:
-            days.discard(day_index)
-            continue
-
-        prefix_lock = re.search(r"(?:锁定|不要改|不能改|不改|保留)\s*$", before)
-        suffix_lock = re.search(r"^.{0,12}(?:锁定|不要改|不能改|不改|保持不变|已确定|保留)", after)
-        if prefix_lock or suffix_lock:
-            days.add(day_index)
+    for clause in re.split(r"[，,；;。\n]", text):
+        matches = list(pattern.finditer(clause))
+        for index, match in enumerate(matches):
+            value = _parse_day_number(match.group(1))
+            if value is None:
+                continue
+            group_start = index
+            while group_start > 0 and re.fullmatch(
+                r"[\s和与及、]*", clause[matches[group_start - 1].end():matches[group_start].start()]
+            ):
+                group_start -= 1
+            # A previous date's trailing predicate is never this date's prefix.
+            before = clause[:matches[group_start].start()] if group_start == 0 else ""
+            cursor = index
+            end = matches[cursor + 1].start() if cursor + 1 < len(matches) else len(clause)
+            after = clause[match.end():end]
+            # Coordinated mentions share the predicate: "第一天和第二天不要改".
+            while cursor + 1 < len(matches) and re.fullmatch(r"[\s和与及、]*", after):
+                cursor += 1
+                end = matches[cursor + 1].start() if cursor + 1 < len(matches) else len(clause)
+                after = clause[matches[cursor].end():end]
+            unlock = r"(?:取消锁定|解除锁定|允许修改|可以修改|可以改)"
+            lock = r"(?:锁定|不要改|不能改|不改|保持不变|已(?:经)?确定|保留)"
+            if re.search(unlock + r"\s*$", before) or re.search(r"^.{0,4}" + unlock, after):
+                days.discard(value - 1)
+            elif re.search(lock + r"\s*$", before) or re.search(r"^.{0,12}" + lock, after):
+                days.add(value - 1)
 
 
 def _apply_hotel_lock_phrase(current: bool, text: str) -> bool:
@@ -227,4 +238,4 @@ def enforce_revision_locks(
             insert_at = min(original_attraction_position, len(attractions))
             attractions.insert(insert_at, copy.deepcopy(original_attraction))
 
-    return protected, violations
+    return adjust_budget_for_edits(revised_plan, protected), violations

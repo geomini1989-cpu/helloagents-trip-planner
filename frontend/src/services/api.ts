@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { TripFormData, TripPlanResponse, TripPreviewResponse } from '@/types'
+import type { TripFormData, TripPlanResponse, TripPreviewResponse, TripPlan } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -86,3 +86,19 @@ export async function healthCheck(): Promise<any> {
 
 export default apiClient
 
+
+export async function getTripSession(sessionId: string): Promise<TripPlanResponse> {
+  const response = await apiClient.get<TripPlanResponse>('/api/trip/session/' + sessionId)
+  return response.data
+}
+
+export async function saveTripEdits(sessionId: string, version: number, data: TripPlan): Promise<TripPlanResponse> {
+  try {
+    const response = await apiClient.put<TripPlanResponse>('/api/trip/session/' + sessionId + '/plan', {
+      expected_version: version, data
+    })
+    return response.data
+  } catch (error: any) {
+    throw new Error(error.response?.data?.detail || error.message || '保存修改失败')
+  }
+}

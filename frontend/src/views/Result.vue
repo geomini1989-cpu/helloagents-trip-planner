@@ -6,13 +6,13 @@
         ← 返回首页
       </a-button>
       <a-space size="middle">
-        <a-button v-if="!editMode" @click="toggleEditMode" type="default">
+        <a-button v-if="!editMode" :disabled="isRevising || !!pendingPreview || sessionVersion === null" @click="toggleEditMode" type="default">
           ✏️ 编辑行程
         </a-button>
-        <a-button v-else @click="saveChanges" type="primary">
+        <a-button v-else :loading="isSaving" @click="saveChanges" type="primary">
           💾 保存修改
         </a-button>
-        <a-button v-if="editMode" @click="cancelEdit" type="default">
+        <a-button v-if="editMode" :disabled="isSaving" @click="cancelEdit" type="default">
           ❌ 取消编辑
         </a-button>
 
@@ -35,7 +35,7 @@
       </a-space>
     </div>
 
-    <div v-if="tripPlan" class="content-wrapper">
+    <div v-if="tripPlan" class="content-wrapper" :inert="isSaving">
       <!-- 侧边导航 -->
       <div class="side-nav">
         <a-affix :offset-top="80">
@@ -347,7 +347,7 @@
           />
           <button 
             @click="handleRevise"
-            :disabled="isRevising || !!pendingPreview || !feedback.trim()"
+            :disabled="editMode || isSaving || sessionVersion === null || isRevising || !!pendingPreview || !feedback.trim()"
             class="send-btn"
             :class="{ 'loading': isRevising }"
           >
@@ -382,12 +382,14 @@ import AMapLoader from '@amap/amap-jsapi-loader'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import type { TripPlan, TripPreviewResponse } from '@/types'
-import { applyTripPreview, previewTripRevision } from '@/services/api'
+import { applyTripPreview, previewTripRevision, getTripSession, saveTripEdits } from '@/services/api'
 
 
 const router = useRouter()
 const tripPlan = ref<TripPlan | null>(null)
 const editMode = ref(false)
+const isSaving = ref(false)
+const sessionVersion = ref<number | null>(null)
 const originalPlan = ref<TripPlan | null>(null)
 const attractionPhotos = ref<Record<string, string>>({})
 const activeSection = ref('overview')
@@ -423,6 +425,19 @@ onMounted(async () => {
     }
   }
 
+  // The server owns the plan and version used for every subsequent edit.
+  if (sessionId.value) {
+    try {
+      const saved = await getTripSession(sessionId.value)
+      if (!saved.data || saved.version === undefined) throw new Error('无法读取最新行程')
+      tripPlan.value = saved.data
+      sessionVersion.value = saved.version
+      sessionStorage.setItem('tripPlan', JSON.stringify(saved.data))
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '读取最新行程失败，请刷新后重试')
+    }
+  }
+
   // 初始化逻辑 (加载图片、地图)
   if (tripPlan.value) {
     await nextTick()
@@ -432,7 +447,7 @@ onMounted(async () => {
 })
 
 const handleRevise = async () => {
-  if (!feedback.value.trim() || !sessionId.value || pendingPreview.value) return
+  if (editMode.value || isSaving.value || sessionVersion.value === null || !feedback.value.trim() || !sessionId.value || pendingPreview.value) return
   
   isRevising.value = true
   const hideLoading = message.loading('AI 正在重新规划行程...', 0)
@@ -461,6 +476,7 @@ const confirmPreview = async () => {
     const result = await applyTripPreview(pendingPreview.value.preview_id)
     if (!result.data) throw new Error('返回数据缺少行程')
     tripPlan.value = result.data
+    sessionVersion.value = result.version ?? null
     sessionStorage.setItem('tripPlan', JSON.stringify(result.data))
     feedback.value = ''
     discardPreview()
@@ -492,6 +508,7 @@ const scrollToSection = ({ key }: { key: string }) => {
 
 // 切换编辑模式
 const toggleEditMode = () => {
+  if (isRevising.value || pendingPreview.value || sessionVersion.value === null) return
   editMode.value = true
   // 保存原始数据用于取消编辑
   originalPlan.value = JSON.parse(JSON.stringify(tripPlan.value))
@@ -499,21 +516,25 @@ const toggleEditMode = () => {
 }
 
 // 保存修改
-const saveChanges = () => {
-  editMode.value = false
-  // 更新sessionStorage
-  if (tripPlan.value) {
-    sessionStorage.setItem('tripPlan', JSON.stringify(tripPlan.value))
-  }
-  message.success('修改已保存')
-
-  // 重新初始化地图以反映更改
-  if (map) {
-    map.destroy()
-  }
-  nextTick(() => {
+const saveChanges = async () => {
+  if (!tripPlan.value || sessionVersion.value === null || isSaving.value) return
+  isSaving.value = true
+  try {
+    const result = await saveTripEdits(sessionId.value, sessionVersion.value, tripPlan.value)
+    if (!result.data || result.version === undefined) throw new Error('保存响应缺少行程版本')
+    tripPlan.value = result.data
+    sessionVersion.value = result.version
+    sessionStorage.setItem('tripPlan', JSON.stringify(result.data))
+    editMode.value = false
+    message.success('修改已保存')
+    if (map) map.destroy()
+    await nextTick()
     initMap()
-  })
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '保存失败，编辑内容已保留')
+  } finally {
+    isSaving.value = false
+  }
 }
 
 // 取消编辑
